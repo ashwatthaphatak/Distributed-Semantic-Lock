@@ -1,0 +1,37 @@
+version: "3.8"
+
+services:
+  qdrant:
+    image: qdrant/qdrant
+    ports:
+      - "6333:6333"
+
+  dscc-node-1:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    environment:
+      - NODE_ID=1
+      - PORT=5001
+    ports:
+      - "5001:5001"
+
+  dscc-node-2:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    environment:
+      - NODE_ID=2
+      - PORT=5002
+    ports:
+      - "5002:5002"
+
+  dscc-node-3:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    environment:
+      - NODE_ID=3
+      - PORT=5003
+    ports:
+      - "5003:5003"

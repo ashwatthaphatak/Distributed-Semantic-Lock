@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package dscc;
+
+service LockService {
+  rpc Ping(PingRequest) returns (PingResponse);
+  rpc AcquireGuard(AcquireRequest) returns (AcquireResponse);
+  rpc ReleaseGuard(ReleaseRequest) returns (ReleaseResponse);
+}
+
+message PingRequest {
+  string from_node = 1;
+}
+
+message PingResponse {
+  string message = 1;
+}
+
+message AcquireRequest {
+  string tx_id = 1;
+  repeated float embedding = 2;
+}
+
+message AcquireResponse {
+  bool granted = 1;
+  string message = 2;
+}
+
+message ReleaseRequest {
+  string tx_id = 1;
+}
+
+message ReleaseResponse {
+  bool success = 1;
+}
