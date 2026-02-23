@@ -1,0 +1,66 @@
+# Build directories
+build/
+bin/
+lib/
+dist/
+out/
+cmake-build-*/
+
+# CMake files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+Makefile
+install_manifest.txt
+
+# Autotools / generic generated files
+aclocal.m4
+autom4te.cache/
+m4/
+
+# Compiler outputs
+*.o
+*.obj
+*.lo
+*.la
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+*.app
+
+# Debug / profiling / coverage
+*.dSYM/
+*.su
+*.gcno
+*.gcda
+*.gcov
+*.prof
+*.profraw
+*.profdata
+
+# Logs and temp files
+*.log
+*.tmp
+*.temp
+*.pid
+*.seed
+*.stackdump
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
