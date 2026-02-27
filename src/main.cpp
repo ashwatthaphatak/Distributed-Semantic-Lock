@@ -1,5 +1,5 @@
 #include <grpcpp/grpcpp.h>
-#include <grpcpp/ext/proto_server_reflection_plugin.h>   // add
+#include <grpcpp/ext/proto_server_reflection_plugin.h>
 #include "lock_service_impl.h"
 #include <iostream>
 #include <cstdlib>
@@ -10,8 +10,8 @@ int main() {
 
     LockServiceImpl service;
 
-    grpc::EnableDefaultHealthCheckService(true);                 // optional but useful
-    grpc::reflection::InitProtoReflectionServerBuilderPlugin();  // reflection
+    grpc::EnableDefaultHealthCheckService(true);
+    grpc::reflection::InitProtoReflectionServerBuilderPlugin();
 
     grpc::ServerBuilder builder;
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());

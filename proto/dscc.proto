@@ -17,7 +17,7 @@ message PingResponse {
 }
 
 message AcquireRequest {
-  string tx_id = 1;
+  string agent_id = 1;
   repeated float embedding = 2;
 }
 
@@ -27,7 +27,7 @@ message AcquireResponse {
 }
 
 message ReleaseRequest {
-  string tx_id = 1;
+  string agent_id = 1;
 }
 
 message ReleaseResponse {
