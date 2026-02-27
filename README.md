@@ -96,3 +96,36 @@ Then rebuild and rerun:
 cmake --build build -j"$(nproc)"
 ./build/dscc-testbench
 ```
+
+## 4. Layer Contract and Assumptions
+
+### Assumptions
+
+- The caller already has an embedding vector; this service does not generate embeddings from text.
+- The caller sends a valid, non-empty `agent_id` and embedding payload.
+- Embeddings compared for overlap are in a compatible vector space.
+- Qdrant is reachable and accepts upsert requests for the configured collection.
+- Cosine similarity threshold (`theta`) is configured to match desired conflict sensitivity.
+
+### Responsibilities This Service Does Not Take
+
+- No embedding model inference (no text-to-embedding step).
+- No prompt orchestration, agent planning, or multi-agent scheduling.
+- No semantic interpretation of text content beyond vector similarity math.
+- No distributed lock coordination across multiple DSCC nodes.
+- No durability/persistence of active lock state across process restarts.
+
+### Expectations From Layer Above (Agentic / Embedding Layer)
+
+- Provide embeddings for each write request.
+- Ensure embeddings are produced by a consistent model/configuration.
+- Provide stable identifiers (`agent_id`) for lock lifecycle and tracing.
+- Handle retries at the call level according to service responses.
+- Decide what text/content should be embedded and sent.
+
+### Expectations From Layer Below (Vector Database Layer)
+
+- Accept vector upsert requests with provided point ID and vector payload.
+- Enforce vector dimension constraints at collection level.
+- Return reliable HTTP status/error responses for write success/failure.
+- Provide availability/latency suitable for lock-hold duration during writes.
