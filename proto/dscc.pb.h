@@ -504,7 +504,10 @@ class AcquireRequest final :
 
   enum : int {
     kEmbeddingFieldNumber = 2,
-    kTxIdFieldNumber = 1,
+    kAgentIdFieldNumber = 1,
+    kPayloadTextFieldNumber = 3,
+    kSourceFileFieldNumber = 4,
+    kTimestampUnixMsFieldNumber = 5,
   };
   // repeated float embedding = 2;
   int embedding_size() const;
@@ -542,6 +545,43 @@ class AcquireRequest final :
   std::string* _internal_mutable_agent_id();
   public:
 
+  // string payload_text = 3;
+  void clear_payload_text();
+  const std::string& payload_text() const;
+  template <typename ArgT0 = const std::string&, typename... ArgT>
+  void set_payload_text(ArgT0&& arg0, ArgT... args);
+  std::string* mutable_payload_text();
+  PROTOBUF_NODISCARD std::string* release_payload_text();
+  void set_allocated_payload_text(std::string* payload_text);
+  private:
+  const std::string& _internal_payload_text() const;
+  inline PROTOBUF_ALWAYS_INLINE void _internal_set_payload_text(const std::string& value);
+  std::string* _internal_mutable_payload_text();
+  public:
+
+  // string source_file = 4;
+  void clear_source_file();
+  const std::string& source_file() const;
+  template <typename ArgT0 = const std::string&, typename... ArgT>
+  void set_source_file(ArgT0&& arg0, ArgT... args);
+  std::string* mutable_source_file();
+  PROTOBUF_NODISCARD std::string* release_source_file();
+  void set_allocated_source_file(std::string* source_file);
+  private:
+  const std::string& _internal_source_file() const;
+  inline PROTOBUF_ALWAYS_INLINE void _internal_set_source_file(const std::string& value);
+  std::string* _internal_mutable_source_file();
+  public:
+
+  // int64 timestamp_unix_ms = 5;
+  void clear_timestamp_unix_ms();
+  int64_t timestamp_unix_ms() const;
+  void set_timestamp_unix_ms(int64_t value);
+  private:
+  int64_t _internal_timestamp_unix_ms() const;
+  void _internal_set_timestamp_unix_ms(int64_t value);
+  public:
+
   // @@protoc_insertion_point(class_scope:dscc.AcquireRequest)
  private:
   class _Internal;
@@ -552,6 +592,9 @@ class AcquireRequest final :
   struct Impl_ {
     ::PROTOBUF_NAMESPACE_ID::RepeatedField< float > embedding_;
     ::PROTOBUF_NAMESPACE_ID::internal::ArenaStringPtr agent_id_;
+    ::PROTOBUF_NAMESPACE_ID::internal::ArenaStringPtr payload_text_;
+    ::PROTOBUF_NAMESPACE_ID::internal::ArenaStringPtr source_file_;
+    int64_t timestamp_unix_ms_;
     mutable ::PROTOBUF_NAMESPACE_ID::internal::CachedSize _cached_size_;
   };
   union { Impl_ _impl_; };
@@ -844,7 +887,7 @@ class ReleaseRequest final :
   // accessors -------------------------------------------------------
 
   enum : int {
-    kTxIdFieldNumber = 1,
+    kAgentIdFieldNumber = 1,
   };
   // string agent_id = 1;
   void clear_agent_id();
@@ -1236,6 +1279,126 @@ inline ::PROTOBUF_NAMESPACE_ID::RepeatedField< float >*
 AcquireRequest::mutable_embedding() {
   // @@protoc_insertion_point(field_mutable_list:dscc.AcquireRequest.embedding)
   return _internal_mutable_embedding();
+}
+
+// string payload_text = 3;
+inline void AcquireRequest::clear_payload_text() {
+  _impl_.payload_text_.ClearToEmpty();
+}
+inline const std::string& AcquireRequest::payload_text() const {
+  // @@protoc_insertion_point(field_get:dscc.AcquireRequest.payload_text)
+  return _internal_payload_text();
+}
+template <typename ArgT0, typename... ArgT>
+inline PROTOBUF_ALWAYS_INLINE
+void AcquireRequest::set_payload_text(ArgT0&& arg0, ArgT... args) {
+ 
+ _impl_.payload_text_.Set(static_cast<ArgT0 &&>(arg0), args..., GetArenaForAllocation());
+  // @@protoc_insertion_point(field_set:dscc.AcquireRequest.payload_text)
+}
+inline std::string* AcquireRequest::mutable_payload_text() {
+  std::string* _s = _internal_mutable_payload_text();
+  // @@protoc_insertion_point(field_mutable:dscc.AcquireRequest.payload_text)
+  return _s;
+}
+inline const std::string& AcquireRequest::_internal_payload_text() const {
+  return _impl_.payload_text_.Get();
+}
+inline void AcquireRequest::_internal_set_payload_text(const std::string& value) {
+  
+  _impl_.payload_text_.Set(value, GetArenaForAllocation());
+}
+inline std::string* AcquireRequest::_internal_mutable_payload_text() {
+  
+  return _impl_.payload_text_.Mutable(GetArenaForAllocation());
+}
+inline std::string* AcquireRequest::release_payload_text() {
+  // @@protoc_insertion_point(field_release:dscc.AcquireRequest.payload_text)
+  return _impl_.payload_text_.Release();
+}
+inline void AcquireRequest::set_allocated_payload_text(std::string* payload_text) {
+  if (payload_text != nullptr) {
+    
+  } else {
+    
+  }
+  _impl_.payload_text_.SetAllocated(payload_text, GetArenaForAllocation());
+#ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
+  if (_impl_.payload_text_.IsDefault()) {
+    _impl_.payload_text_.Set("", GetArenaForAllocation());
+  }
+#endif // PROTOBUF_FORCE_COPY_DEFAULT_STRING
+  // @@protoc_insertion_point(field_set_allocated:dscc.AcquireRequest.payload_text)
+}
+
+// string source_file = 4;
+inline void AcquireRequest::clear_source_file() {
+  _impl_.source_file_.ClearToEmpty();
+}
+inline const std::string& AcquireRequest::source_file() const {
+  // @@protoc_insertion_point(field_get:dscc.AcquireRequest.source_file)
+  return _internal_source_file();
+}
+template <typename ArgT0, typename... ArgT>
+inline PROTOBUF_ALWAYS_INLINE
+void AcquireRequest::set_source_file(ArgT0&& arg0, ArgT... args) {
+ 
+ _impl_.source_file_.Set(static_cast<ArgT0 &&>(arg0), args..., GetArenaForAllocation());
+  // @@protoc_insertion_point(field_set:dscc.AcquireRequest.source_file)
+}
+inline std::string* AcquireRequest::mutable_source_file() {
+  std::string* _s = _internal_mutable_source_file();
+  // @@protoc_insertion_point(field_mutable:dscc.AcquireRequest.source_file)
+  return _s;
+}
+inline const std::string& AcquireRequest::_internal_source_file() const {
+  return _impl_.source_file_.Get();
+}
+inline void AcquireRequest::_internal_set_source_file(const std::string& value) {
+  
+  _impl_.source_file_.Set(value, GetArenaForAllocation());
+}
+inline std::string* AcquireRequest::_internal_mutable_source_file() {
+  
+  return _impl_.source_file_.Mutable(GetArenaForAllocation());
+}
+inline std::string* AcquireRequest::release_source_file() {
+  // @@protoc_insertion_point(field_release:dscc.AcquireRequest.source_file)
+  return _impl_.source_file_.Release();
+}
+inline void AcquireRequest::set_allocated_source_file(std::string* source_file) {
+  if (source_file != nullptr) {
+    
+  } else {
+    
+  }
+  _impl_.source_file_.SetAllocated(source_file, GetArenaForAllocation());
+#ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
+  if (_impl_.source_file_.IsDefault()) {
+    _impl_.source_file_.Set("", GetArenaForAllocation());
+  }
+#endif // PROTOBUF_FORCE_COPY_DEFAULT_STRING
+  // @@protoc_insertion_point(field_set_allocated:dscc.AcquireRequest.source_file)
+}
+
+// int64 timestamp_unix_ms = 5;
+inline void AcquireRequest::clear_timestamp_unix_ms() {
+  _impl_.timestamp_unix_ms_ = int64_t{0};
+}
+inline int64_t AcquireRequest::_internal_timestamp_unix_ms() const {
+  return _impl_.timestamp_unix_ms_;
+}
+inline int64_t AcquireRequest::timestamp_unix_ms() const {
+  // @@protoc_insertion_point(field_get:dscc.AcquireRequest.timestamp_unix_ms)
+  return _internal_timestamp_unix_ms();
+}
+inline void AcquireRequest::_internal_set_timestamp_unix_ms(int64_t value) {
+  
+  _impl_.timestamp_unix_ms_ = value;
+}
+inline void AcquireRequest::set_timestamp_unix_ms(int64_t value) {
+  _internal_set_timestamp_unix_ms(value);
+  // @@protoc_insertion_point(field_set:dscc.AcquireRequest.timestamp_unix_ms)
 }
 
 // -------------------------------------------------------------------

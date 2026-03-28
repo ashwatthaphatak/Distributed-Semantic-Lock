@@ -1,21 +1,46 @@
+// Implements the in-memory semantic lock table.
+// This is the DSLM blocking layer that decides whether a request must wait.
+// lock_service_impl.cpp calls into this file before any Qdrant write happens.
+
 #include "active_lock_table.h"
 #include "threadsafe_log.h"
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <sstream>
 
-void ActiveLockTable::acquire(const std::string& agent_id,
-                              const std::vector<float>& embedding,
-                              float threshold) {
+AcquireTrace ActiveLockTable::acquire(const std::string& agent_id,
+                                      const std::vector<float>& embedding,
+                                      float threshold) {
     std::unique_lock<std::mutex> lock(mu_);
-    while (overlap_exists(embedding, threshold)) {
+    AcquireTrace aggregate_trace;
+    while (true) {
+        const AcquireTrace overlap = overlap_trace(embedding, threshold);
+        if (!overlap.waited) {
+            break;
+        }
+
+        aggregate_trace.waited = true;
+        if (overlap.blocking_similarity_score >= aggregate_trace.blocking_similarity_score) {
+            aggregate_trace.blocking_similarity_score = overlap.blocking_similarity_score;
+            aggregate_trace.blocking_agent_id = overlap.blocking_agent_id;
+        }
+
+        std::ostringstream oss;
+        oss << "[LOCK] " << agent_id
+            << " blocked by " << overlap.blocking_agent_id
+            << " similarity=" << std::fixed << std::setprecision(3)
+            << overlap.blocking_similarity_score
+            << " threshold=" << threshold;
+        log_line(oss.str());
         cv_.wait(lock);
     }
 
     active_.push_back(SemanticLock{agent_id, embedding, threshold});
     lock.unlock();
     print_active_locks();
+    return aggregate_trace;
 }
 
 void ActiveLockTable::release(const std::string& agent_id) {
@@ -60,14 +85,19 @@ void ActiveLockTable::print_active_locks() const {
     log_line(oss.str());
 }
 
-bool ActiveLockTable::overlap_exists(const std::vector<float>& embedding,
-                                     float threshold) {
+AcquireTrace ActiveLockTable::overlap_trace(const std::vector<float>& embedding,
+                                            float threshold) {
+    AcquireTrace trace;
     for (const auto& entry : active_) {
-        if (cosine_similarity(embedding, entry.centroid) >= threshold) {
-            return true;
+        const float similarity = cosine_similarity(embedding, entry.centroid);
+        if (similarity >= threshold &&
+            similarity >= trace.blocking_similarity_score) {
+            trace.waited = true;
+            trace.blocking_similarity_score = similarity;
+            trace.blocking_agent_id = entry.agent_id;
         }
     }
-    return false;
+    return trace;
 }
 
 float ActiveLockTable::cosine_similarity(const std::vector<float>& a,

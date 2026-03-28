@@ -1,3 +1,6 @@
+// Provides serialized console logging for multi-threaded output.
+// Multiple demo and server files use this to avoid interleaved terminal lines.
+
 #include "threadsafe_log.h"
 
 #include <iostream>

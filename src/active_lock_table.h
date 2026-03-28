@@ -1,3 +1,7 @@
+// Declares the in-memory semantic lock table and the lock-acquire trace data.
+// This is the core overlap-checking layer used by lock_service_impl.cpp.
+// It owns the active lock list and exposes acquire/release operations.
+
 #pragma once
 
 #include <condition_variable>
@@ -12,11 +16,17 @@ struct SemanticLock {
     float threshold;
 };
 
+struct AcquireTrace {
+    bool waited = false;
+    float blocking_similarity_score = 0.0f;
+    std::string blocking_agent_id;
+};
+
 class ActiveLockTable {
 public:
-    void acquire(const std::string& agent_id,
-                 const std::vector<float>& embedding,
-                 float threshold);
+    AcquireTrace acquire(const std::string& agent_id,
+                         const std::vector<float>& embedding,
+                         float threshold);
 
     void release(const std::string& agent_id);
 
@@ -25,8 +35,8 @@ public:
     void print_active_locks() const;
 
 private:
-    bool overlap_exists(const std::vector<float>& embedding,
-                        float threshold);
+    AcquireTrace overlap_trace(const std::vector<float>& embedding,
+                               float threshold);
 
     float cosine_similarity(const std::vector<float>& a,
                             const std::vector<float>& b);

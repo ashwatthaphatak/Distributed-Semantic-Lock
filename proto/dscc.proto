@@ -1,3 +1,7 @@
+// Defines the gRPC contract between the end-to-end bench and dscc-node.
+// AcquireGuard carries embeddings plus trace metadata used in the demo output.
+// The generated protobuf files are built from this schema.
+
 syntax = "proto3";
 
 package dscc;
@@ -19,11 +23,21 @@ message PingResponse {
 message AcquireRequest {
   string agent_id = 1;
   repeated float embedding = 2;
+  string payload_text = 3;
+  string source_file = 4;
+  int64 timestamp_unix_ms = 5;
 }
 
 message AcquireResponse {
   bool granted = 1;
   string message = 2;
+  int64 server_received_unix_ms = 3;
+  int64 lock_acquired_unix_ms = 4;
+  int64 qdrant_write_complete_unix_ms = 5;
+  int64 lock_released_unix_ms = 6;
+  int64 lock_wait_ms = 7;
+  float blocking_similarity_score = 8;
+  string blocking_agent_id = 9;
 }
 
 message ReleaseRequest {

@@ -1,3 +1,7 @@
+// Implements the gRPC lock service used by dscc-node.
+// This file bridges the semantic lock table and the Qdrant write path.
+// It is the server-side core that the end-to-end bench exercises.
+
 #include "lock_service_impl.h"
 
 #include <netdb.h>
@@ -5,12 +9,16 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <cstdint>
+#include <limits>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <thread>
 #include <utility>
 
 namespace {
@@ -50,9 +58,38 @@ float read_theta_from_env() {
     return parsed;
 }
 
+int read_lock_hold_ms_from_env() {
+    const char* hold_env = std::getenv("LOCK_HOLD_MS");
+    if (hold_env == nullptr) {
+        return 0;
+    }
+
+    char* endptr = nullptr;
+    const long parsed = std::strtol(hold_env, &endptr, 10);
+    if (endptr == hold_env || parsed < 0L || parsed > 600000L) {
+        return 0;
+    }
+    return static_cast<int>(parsed);
+}
+
 std::string getenv_or_default(const char* key, const char* fallback) {
     const char* value = std::getenv(key);
     return value != nullptr ? value : fallback;
+}
+
+int64_t make_numeric_point_id(const std::string& agent_id, int64_t timestamp_unix_ms) {
+    constexpr uint64_t kFnvOffset = 1469598103934665603ULL;
+    constexpr uint64_t kFnvPrime = 1099511628211ULL;
+
+    uint64_t hash = kFnvOffset;
+    for (unsigned char c : agent_id) {
+        hash ^= static_cast<uint64_t>(c);
+        hash *= kFnvPrime;
+    }
+
+    const uint64_t mixed =
+        (static_cast<uint64_t>(timestamp_unix_ms) << 22) ^ (hash & ((1ULL << 22) - 1ULL));
+    return static_cast<int64_t>(mixed & static_cast<uint64_t>(std::numeric_limits<int64_t>::max()));
 }
 
 std::string escape_json(const std::string& input) {
@@ -108,6 +145,7 @@ bool send_all(int socket_fd, const std::string& payload) {
 
 LockServiceImpl::LockServiceImpl()
     : theta_(read_theta_from_env()),
+      lock_hold_ms_(read_lock_hold_ms_from_env()),
       qdrant_host_(getenv_or_default("QDRANT_HOST", "qdrant")),
       qdrant_port_(getenv_or_default("QDRANT_PORT", "6333")),
       qdrant_collection_(getenv_or_default("QDRANT_COLLECTION", "dscc_memory")) {}
@@ -128,6 +166,17 @@ grpc::Status LockServiceImpl::AcquireGuard(
     const std::string agent_id = request->agent_id();
     const std::vector<float> embedding(request->embedding().begin(),
                                        request->embedding().end());
+    const std::string payload_text = request->payload_text();
+    const std::string source_file = request->source_file();
+    const auto now_ms = []() -> int64_t {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    };
+    const int64_t timestamp_unix_ms =
+        request->timestamp_unix_ms() > 0 ? request->timestamp_unix_ms() : now_ms();
+    const int64_t point_id = make_numeric_point_id(agent_id, timestamp_unix_ms);
+    const int64_t server_received_unix_ms = now_ms();
 
     if (agent_id.empty()) {
         response->set_granted(false);
@@ -141,7 +190,15 @@ grpc::Status LockServiceImpl::AcquireGuard(
     }
 
     std::cout << "[TX " << agent_id << "] attempting acquire" << std::endl;
-    lock_table_.acquire(agent_id, embedding, theta_);
+    response->set_server_received_unix_ms(server_received_unix_ms);
+    const AcquireTrace acquire_trace = lock_table_.acquire(agent_id, embedding, theta_);
+    const int64_t lock_acquired_unix_ms = now_ms();
+    response->set_lock_acquired_unix_ms(lock_acquired_unix_ms);
+    response->set_lock_wait_ms(lock_acquired_unix_ms - server_received_unix_ms);
+    response->set_blocking_similarity_score(acquire_trace.blocking_similarity_score);
+    if (!acquire_trace.blocking_agent_id.empty()) {
+        response->set_blocking_agent_id(acquire_trace.blocking_agent_id);
+    }
     std::cout << "[TX " << agent_id << "] acquired lock (active count = "
               << lock_table_.size() << ")" << std::endl;
 
@@ -156,16 +213,27 @@ grpc::Status LockServiceImpl::AcquireGuard(
     };
     ScopeExit release_guard(release_once);
 
-    const bool qdrant_ok = upsert_embedding_to_qdrant(agent_id, embedding);
+    const bool qdrant_ok = upsert_embedding_to_qdrant(point_id,
+                                                      agent_id,
+                                                      payload_text,
+                                                      source_file,
+                                                      timestamp_unix_ms,
+                                                      embedding);
     if (!qdrant_ok) {
         response->set_granted(false);
         response->set_message("qdrant write failed");
         return grpc::Status::OK;
     }
+    response->set_qdrant_write_complete_unix_ms(now_ms());
+
+    if (lock_hold_ms_ > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(lock_hold_ms_));
+    }
 
     release_once();
     release_guard.dismiss();
 
+    response->set_lock_released_unix_ms(now_ms());
     response->set_granted(true);
     response->set_message("granted and committed");
     return grpc::Status::OK;
@@ -189,7 +257,11 @@ grpc::Status LockServiceImpl::ReleaseGuard(
 }
 
 bool LockServiceImpl::upsert_embedding_to_qdrant(
+    int64_t point_id,
     const std::string& agent_id,
+    const std::string& payload_text,
+    const std::string& source_file,
+    int64_t timestamp_unix_ms,
     const std::vector<float>& embedding) const {
     if (embedding.empty()) {
         return false;
@@ -200,29 +272,52 @@ bool LockServiceImpl::upsert_embedding_to_qdrant(
     }
 
     std::ostringstream body;
-    body << "{\"points\":[{\"id\":\"" << escape_json(agent_id) << "\",\"vector\":[";
+    body << "{\"points\":[{\"id\":" << point_id << ",\"vector\":[";
     for (size_t i = 0; i < embedding.size(); ++i) {
         if (i > 0) {
             body << ",";
         }
         body << std::setprecision(8) << embedding[i];
     }
-    body << "]}]}";
+    body << "],\"payload\":{"
+         << "\"agent_id\":\"" << escape_json(agent_id) << "\","
+         << "\"source_file\":\"" << escape_json(source_file) << "\","
+         << "\"timestamp_unix_ms\":" << timestamp_unix_ms << ","
+         << "\"raw_text\":\"" << escape_json(payload_text) << "\""
+         << "}}]}";
 
-    int status_code = 0;
-    std::string response_body;
     const std::string target = "/collections/" + qdrant_collection_ + "/points?wait=true";
-    if (!send_http_json("PUT", target, body.str(), status_code, response_body)) {
-        std::cout << "[QDRANT] request failed for agent_id=" << agent_id << std::endl;
-        return false;
-    }
+    for (int attempt = 1; attempt <= 3; ++attempt) {
+        int status_code = 0;
+        std::string response_body;
+        if (!send_http_json("PUT", target, body.str(), status_code, response_body)) {
+            std::cout << "[QDRANT] request failed for agent_id=" << agent_id
+                      << " target=" << target
+                      << " attempt=" << attempt << std::endl;
+            if (attempt < 3) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(75 * attempt));
+                continue;
+            }
+            return false;
+        }
 
-    if (status_code != 200 && status_code != 201) {
+        if (status_code == 200 || status_code == 201) {
+            return true;
+        }
+
+        const bool retryable = status_code == 500 &&
+            response_body.find("Please retry") != std::string::npos;
         std::cout << "[QDRANT] upsert failed for agent_id=" << agent_id
-                  << " status=" << status_code << std::endl;
+                  << " status=" << status_code
+                  << " attempt=" << attempt
+                  << " response=" << response_body << std::endl;
+        if (retryable && attempt < 3) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(75 * attempt));
+            continue;
+        }
         return false;
     }
-    return true;
+    return false;
 }
 
 bool LockServiceImpl::ensure_qdrant_collection(size_t vector_size) const {
@@ -239,12 +334,32 @@ bool LockServiceImpl::ensure_qdrant_collection(size_t vector_size) const {
     const std::string target = "/collections/" + qdrant_collection_;
     if (!send_http_json("PUT", target, body.str(), status_code, response_body)) {
         std::cout << "[QDRANT] could not ensure collection " << qdrant_collection_
-                  << std::endl;
+                  << " target=" << target << std::endl;
         return false;
     }
 
-    // 409 is acceptable when the collection already exists.
-    return status_code == 200 || status_code == 201 || status_code == 409;
+    const std::string normalized = [&response_body]() {
+        std::string lowered = response_body;
+        for (char& c : lowered) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        return lowered;
+    }();
+
+    // Qdrant may report an existing collection as 409 or 400 depending on the
+    // timing of concurrent create requests after a delete/recreate cycle.
+    if (status_code == 200 ||
+        status_code == 201 ||
+        status_code == 409 ||
+        (status_code == 400 &&
+         normalized.find("already exists") != std::string::npos)) {
+        return true;
+    }
+
+    std::cout << "[QDRANT] ensure collection failed collection=" << qdrant_collection_
+              << " status=" << status_code
+              << " response=" << response_body << std::endl;
+    return false;
 }
 
 bool LockServiceImpl::send_http_json(const std::string& method,

@@ -1,3 +1,7 @@
+// Runs a small in-process concurrency test for the ActiveLockTable only.
+// This is a lower-level developer check, separate from the real end-to-end bench.
+// Use e2e_bench.cpp when you want Docker, embeddings, gRPC, and Qdrant involved.
+
 #include "active_lock_table.h"
 #include "threadsafe_log.h"
 
