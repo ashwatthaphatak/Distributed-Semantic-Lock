@@ -1,10 +1,22 @@
+// Declares the gRPC service implementation for the semantic lock manager.
+// This interface is owned by dscc-node and is implemented in lock_service_impl.cpp.
+// It sits between incoming AcquireGuard RPCs and the active lock/Qdrant layers.
+
 #pragma once
 
 #include <grpcpp/grpcpp.h>
 #include "dscc.grpc.pb.h"
+#include "active_lock_table.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <vector>
 
 class LockServiceImpl final : public dscc::LockService::Service {
 public:
+    LockServiceImpl();
+
     grpc::Status Ping(grpc::ServerContext* context,
                       const dscc::PingRequest* request,
                       dscc::PingResponse* response) override;
@@ -16,4 +28,27 @@ public:
     grpc::Status ReleaseGuard(grpc::ServerContext* context,
                               const dscc::ReleaseRequest* request,
                               dscc::ReleaseResponse* response) override;
+
+private:
+    bool upsert_embedding_to_qdrant(int64_t point_id,
+                                    const std::string& agent_id,
+                                    const std::string& payload_text,
+                                    const std::string& source_file,
+                                    int64_t timestamp_unix_ms,
+                                    const std::vector<float>& embedding) const;
+
+    bool ensure_qdrant_collection(size_t vector_size) const;
+
+    bool send_http_json(const std::string& method,
+                        const std::string& target,
+                        const std::string& body,
+                        int& status_code,
+                        std::string& response_body) const;
+
+    ActiveLockTable lock_table_;
+    float theta_;
+    int lock_hold_ms_;
+    std::string qdrant_host_;
+    std::string qdrant_port_;
+    std::string qdrant_collection_;
 };

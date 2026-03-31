@@ -50,7 +50,10 @@ PROTOBUF_ATTRIBUTE_NO_DESTROY PROTOBUF_CONSTINIT PROTOBUF_ATTRIBUTE_INIT_PRIORIT
 PROTOBUF_CONSTEXPR AcquireRequest::AcquireRequest(
     ::_pbi::ConstantInitialized): _impl_{
     /*decltype(_impl_.embedding_)*/{}
-  , /*decltype(_impl_.tx_id_)*/{&::_pbi::fixed_address_empty_string, ::_pbi::ConstantInitialized{}}
+  , /*decltype(_impl_.agent_id_)*/{&::_pbi::fixed_address_empty_string, ::_pbi::ConstantInitialized{}}
+  , /*decltype(_impl_.payload_text_)*/{&::_pbi::fixed_address_empty_string, ::_pbi::ConstantInitialized{}}
+  , /*decltype(_impl_.source_file_)*/{&::_pbi::fixed_address_empty_string, ::_pbi::ConstantInitialized{}}
+  , /*decltype(_impl_.timestamp_unix_ms_)*/int64_t{0}
   , /*decltype(_impl_._cached_size_)*/{}} {}
 struct AcquireRequestDefaultTypeInternal {
   PROTOBUF_CONSTEXPR AcquireRequestDefaultTypeInternal()
@@ -77,7 +80,7 @@ struct AcquireResponseDefaultTypeInternal {
 PROTOBUF_ATTRIBUTE_NO_DESTROY PROTOBUF_CONSTINIT PROTOBUF_ATTRIBUTE_INIT_PRIORITY1 AcquireResponseDefaultTypeInternal _AcquireResponse_default_instance_;
 PROTOBUF_CONSTEXPR ReleaseRequest::ReleaseRequest(
     ::_pbi::ConstantInitialized): _impl_{
-    /*decltype(_impl_.tx_id_)*/{&::_pbi::fixed_address_empty_string, ::_pbi::ConstantInitialized{}}
+    /*decltype(_impl_.agent_id_)*/{&::_pbi::fixed_address_empty_string, ::_pbi::ConstantInitialized{}}
   , /*decltype(_impl_._cached_size_)*/{}} {}
 struct ReleaseRequestDefaultTypeInternal {
   PROTOBUF_CONSTEXPR ReleaseRequestDefaultTypeInternal()
@@ -127,8 +130,11 @@ const uint32_t TableStruct_dscc_2eproto::offsets[] PROTOBUF_SECTION_VARIABLE(pro
   ~0u,  // no _oneof_case_
   ~0u,  // no _weak_field_map_
   ~0u,  // no _inlined_string_donated_
-  PROTOBUF_FIELD_OFFSET(::dscc::AcquireRequest, _impl_.tx_id_),
+  PROTOBUF_FIELD_OFFSET(::dscc::AcquireRequest, _impl_.agent_id_),
   PROTOBUF_FIELD_OFFSET(::dscc::AcquireRequest, _impl_.embedding_),
+  PROTOBUF_FIELD_OFFSET(::dscc::AcquireRequest, _impl_.payload_text_),
+  PROTOBUF_FIELD_OFFSET(::dscc::AcquireRequest, _impl_.source_file_),
+  PROTOBUF_FIELD_OFFSET(::dscc::AcquireRequest, _impl_.timestamp_unix_ms_),
   ~0u,  // no _has_bits_
   PROTOBUF_FIELD_OFFSET(::dscc::AcquireResponse, _internal_metadata_),
   ~0u,  // no _extensions_
@@ -143,7 +149,7 @@ const uint32_t TableStruct_dscc_2eproto::offsets[] PROTOBUF_SECTION_VARIABLE(pro
   ~0u,  // no _oneof_case_
   ~0u,  // no _weak_field_map_
   ~0u,  // no _inlined_string_donated_
-  PROTOBUF_FIELD_OFFSET(::dscc::ReleaseRequest, _impl_.tx_id_),
+  PROTOBUF_FIELD_OFFSET(::dscc::ReleaseRequest, _impl_.agent_id_),
   ~0u,  // no _has_bits_
   PROTOBUF_FIELD_OFFSET(::dscc::ReleaseResponse, _internal_metadata_),
   ~0u,  // no _extensions_
@@ -156,9 +162,9 @@ static const ::_pbi::MigrationSchema schemas[] PROTOBUF_SECTION_VARIABLE(protode
   { 0, -1, -1, sizeof(::dscc::PingRequest)},
   { 7, -1, -1, sizeof(::dscc::PingResponse)},
   { 14, -1, -1, sizeof(::dscc::AcquireRequest)},
-  { 22, -1, -1, sizeof(::dscc::AcquireResponse)},
-  { 30, -1, -1, sizeof(::dscc::ReleaseRequest)},
-  { 37, -1, -1, sizeof(::dscc::ReleaseResponse)},
+  { 25, -1, -1, sizeof(::dscc::AcquireResponse)},
+  { 33, -1, -1, sizeof(::dscc::ReleaseRequest)},
+  { 40, -1, -1, sizeof(::dscc::ReleaseResponse)},
 };
 
 static const ::_pb::Message* const file_default_instances[] = {
@@ -173,20 +179,22 @@ static const ::_pb::Message* const file_default_instances[] = {
 const char descriptor_table_protodef_dscc_2eproto[] PROTOBUF_SECTION_VARIABLE(protodesc_cold) =
   "\n\ndscc.proto\022\004dscc\" \n\013PingRequest\022\021\n\tfro"
   "m_node\030\001 \001(\t\"\037\n\014PingResponse\022\017\n\007message\030"
-  "\001 \001(\t\"2\n\016AcquireRequest\022\r\n\005tx_id\030\001 \001(\t\022\021"
-  "\n\tembedding\030\002 \003(\002\"3\n\017AcquireResponse\022\017\n\007"
-  "granted\030\001 \001(\010\022\017\n\007message\030\002 \001(\t\"\037\n\016Releas"
-  "eRequest\022\r\n\005tx_id\030\001 \001(\t\"\"\n\017ReleaseRespon"
-  "se\022\017\n\007success\030\001 \001(\0102\266\001\n\013LockService\022-\n\004P"
-  "ing\022\021.dscc.PingRequest\032\022.dscc.PingRespon"
-  "se\022;\n\014AcquireGuard\022\024.dscc.AcquireRequest"
-  "\032\025.dscc.AcquireResponse\022;\n\014ReleaseGuard\022"
-  "\024.dscc.ReleaseRequest\032\025.dscc.ReleaseResp"
-  "onseb\006proto3"
+  "\001 \001(\t\"{\n\016AcquireRequest\022\020\n\010agent_id\030\001 \001("
+  "\t\022\021\n\tembedding\030\002 \003(\002\022\024\n\014payload_text\030\003 \001"
+  "(\t\022\023\n\013source_file\030\004 \001(\t\022\031\n\021timestamp_uni"
+  "x_ms\030\005 \001(\003\"3\n\017AcquireResponse\022\017\n\007granted"
+  "\030\001 \001(\010\022\017\n\007message\030\002 \001(\t\"\"\n\016ReleaseReques"
+  "t\022\020\n\010agent_id\030\001 \001(\t\"\"\n\017ReleaseResponse\022\017"
+  "\n\007success\030\001 \001(\0102\266\001\n\013LockService\022-\n\004Ping\022"
+  "\021.dscc.PingRequest\032\022.dscc.PingResponse\022;"
+  "\n\014AcquireGuard\022\024.dscc.AcquireRequest\032\025.d"
+  "scc.AcquireResponse\022;\n\014ReleaseGuard\022\024.ds"
+  "cc.ReleaseRequest\032\025.dscc.ReleaseResponse"
+  "b\006proto3"
   ;
 static ::_pbi::once_flag descriptor_table_dscc_2eproto_once;
 const ::_pbi::DescriptorTable descriptor_table_dscc_2eproto = {
-    false, false, 452, descriptor_table_protodef_dscc_2eproto,
+    false, false, 528, descriptor_table_protodef_dscc_2eproto,
     "dscc.proto",
     &descriptor_table_dscc_2eproto_once, nullptr, 0, 6,
     schemas, file_default_instances, TableStruct_dscc_2eproto::offsets,
@@ -624,18 +632,38 @@ AcquireRequest::AcquireRequest(const AcquireRequest& from)
   AcquireRequest* const _this = this; (void)_this;
   new (&_impl_) Impl_{
       decltype(_impl_.embedding_){from._impl_.embedding_}
-    , decltype(_impl_.tx_id_){}
+    , decltype(_impl_.agent_id_){}
+    , decltype(_impl_.payload_text_){}
+    , decltype(_impl_.source_file_){}
+    , decltype(_impl_.timestamp_unix_ms_){}
     , /*decltype(_impl_._cached_size_)*/{}};
 
   _internal_metadata_.MergeFrom<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(from._internal_metadata_);
-  _impl_.tx_id_.InitDefault();
+  _impl_.agent_id_.InitDefault();
   #ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
-    _impl_.tx_id_.Set("", GetArenaForAllocation());
+    _impl_.agent_id_.Set("", GetArenaForAllocation());
   #endif // PROTOBUF_FORCE_COPY_DEFAULT_STRING
-  if (!from._internal_tx_id().empty()) {
-    _this->_impl_.tx_id_.Set(from._internal_tx_id(), 
+  if (!from._internal_agent_id().empty()) {
+    _this->_impl_.agent_id_.Set(from._internal_agent_id(), 
       _this->GetArenaForAllocation());
   }
+  _impl_.payload_text_.InitDefault();
+  #ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
+    _impl_.payload_text_.Set("", GetArenaForAllocation());
+  #endif // PROTOBUF_FORCE_COPY_DEFAULT_STRING
+  if (!from._internal_payload_text().empty()) {
+    _this->_impl_.payload_text_.Set(from._internal_payload_text(), 
+      _this->GetArenaForAllocation());
+  }
+  _impl_.source_file_.InitDefault();
+  #ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
+    _impl_.source_file_.Set("", GetArenaForAllocation());
+  #endif // PROTOBUF_FORCE_COPY_DEFAULT_STRING
+  if (!from._internal_source_file().empty()) {
+    _this->_impl_.source_file_.Set(from._internal_source_file(), 
+      _this->GetArenaForAllocation());
+  }
+  _this->_impl_.timestamp_unix_ms_ = from._impl_.timestamp_unix_ms_;
   // @@protoc_insertion_point(copy_constructor:dscc.AcquireRequest)
 }
 
@@ -645,12 +673,23 @@ inline void AcquireRequest::SharedCtor(
   (void)is_message_owned;
   new (&_impl_) Impl_{
       decltype(_impl_.embedding_){arena}
-    , decltype(_impl_.tx_id_){}
+    , decltype(_impl_.agent_id_){}
+    , decltype(_impl_.payload_text_){}
+    , decltype(_impl_.source_file_){}
+    , decltype(_impl_.timestamp_unix_ms_){int64_t{0}}
     , /*decltype(_impl_._cached_size_)*/{}
   };
-  _impl_.tx_id_.InitDefault();
+  _impl_.agent_id_.InitDefault();
   #ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
-    _impl_.tx_id_.Set("", GetArenaForAllocation());
+    _impl_.agent_id_.Set("", GetArenaForAllocation());
+  #endif // PROTOBUF_FORCE_COPY_DEFAULT_STRING
+  _impl_.payload_text_.InitDefault();
+  #ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
+    _impl_.payload_text_.Set("", GetArenaForAllocation());
+  #endif // PROTOBUF_FORCE_COPY_DEFAULT_STRING
+  _impl_.source_file_.InitDefault();
+  #ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
+    _impl_.source_file_.Set("", GetArenaForAllocation());
   #endif // PROTOBUF_FORCE_COPY_DEFAULT_STRING
 }
 
@@ -666,7 +705,9 @@ AcquireRequest::~AcquireRequest() {
 inline void AcquireRequest::SharedDtor() {
   GOOGLE_DCHECK(GetArenaForAllocation() == nullptr);
   _impl_.embedding_.~RepeatedField();
-  _impl_.tx_id_.Destroy();
+  _impl_.agent_id_.Destroy();
+  _impl_.payload_text_.Destroy();
+  _impl_.source_file_.Destroy();
 }
 
 void AcquireRequest::SetCachedSize(int size) const {
@@ -680,7 +721,10 @@ void AcquireRequest::Clear() {
   (void) cached_has_bits;
 
   _impl_.embedding_.Clear();
-  _impl_.tx_id_.ClearToEmpty();
+  _impl_.agent_id_.ClearToEmpty();
+  _impl_.payload_text_.ClearToEmpty();
+  _impl_.source_file_.ClearToEmpty();
+  _impl_.timestamp_unix_ms_ = int64_t{0};
   _internal_metadata_.Clear<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>();
 }
 
@@ -690,13 +734,13 @@ const char* AcquireRequest::_InternalParse(const char* ptr, ::_pbi::ParseContext
     uint32_t tag;
     ptr = ::_pbi::ReadTag(ptr, &tag);
     switch (tag >> 3) {
-      // string tx_id = 1;
+      // string agent_id = 1;
       case 1:
         if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 10)) {
-          auto str = _internal_mutable_tx_id();
+          auto str = _internal_mutable_agent_id();
           ptr = ::_pbi::InlineGreedyStringParser(str, ptr, ctx);
           CHK_(ptr);
-          CHK_(::_pbi::VerifyUTF8(str, "dscc.AcquireRequest.tx_id"));
+          CHK_(::_pbi::VerifyUTF8(str, "dscc.AcquireRequest.agent_id"));
         } else
           goto handle_unusual;
         continue;
@@ -708,6 +752,34 @@ const char* AcquireRequest::_InternalParse(const char* ptr, ::_pbi::ParseContext
         } else if (static_cast<uint8_t>(tag) == 21) {
           _internal_add_embedding(::PROTOBUF_NAMESPACE_ID::internal::UnalignedLoad<float>(ptr));
           ptr += sizeof(float);
+        } else
+          goto handle_unusual;
+        continue;
+      // string payload_text = 3;
+      case 3:
+        if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 26)) {
+          auto str = _internal_mutable_payload_text();
+          ptr = ::_pbi::InlineGreedyStringParser(str, ptr, ctx);
+          CHK_(ptr);
+          CHK_(::_pbi::VerifyUTF8(str, "dscc.AcquireRequest.payload_text"));
+        } else
+          goto handle_unusual;
+        continue;
+      // string source_file = 4;
+      case 4:
+        if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 34)) {
+          auto str = _internal_mutable_source_file();
+          ptr = ::_pbi::InlineGreedyStringParser(str, ptr, ctx);
+          CHK_(ptr);
+          CHK_(::_pbi::VerifyUTF8(str, "dscc.AcquireRequest.source_file"));
+        } else
+          goto handle_unusual;
+        continue;
+      // int64 timestamp_unix_ms = 5;
+      case 5:
+        if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 40)) {
+          _impl_.timestamp_unix_ms_ = ::PROTOBUF_NAMESPACE_ID::internal::ReadVarint64(&ptr);
+          CHK_(ptr);
         } else
           goto handle_unusual;
         continue;
@@ -740,19 +812,45 @@ uint8_t* AcquireRequest::_InternalSerialize(
   uint32_t cached_has_bits = 0;
   (void) cached_has_bits;
 
-  // string tx_id = 1;
-  if (!this->_internal_tx_id().empty()) {
+  // string agent_id = 1;
+  if (!this->_internal_agent_id().empty()) {
     ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::VerifyUtf8String(
-      this->_internal_tx_id().data(), static_cast<int>(this->_internal_tx_id().length()),
+      this->_internal_agent_id().data(), static_cast<int>(this->_internal_agent_id().length()),
       ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::SERIALIZE,
-      "dscc.AcquireRequest.tx_id");
+      "dscc.AcquireRequest.agent_id");
     target = stream->WriteStringMaybeAliased(
-        1, this->_internal_tx_id(), target);
+        1, this->_internal_agent_id(), target);
   }
 
   // repeated float embedding = 2;
   if (this->_internal_embedding_size() > 0) {
     target = stream->WriteFixedPacked(2, _internal_embedding(), target);
+  }
+
+  // string payload_text = 3;
+  if (!this->_internal_payload_text().empty()) {
+    ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::VerifyUtf8String(
+      this->_internal_payload_text().data(), static_cast<int>(this->_internal_payload_text().length()),
+      ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::SERIALIZE,
+      "dscc.AcquireRequest.payload_text");
+    target = stream->WriteStringMaybeAliased(
+        3, this->_internal_payload_text(), target);
+  }
+
+  // string source_file = 4;
+  if (!this->_internal_source_file().empty()) {
+    ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::VerifyUtf8String(
+      this->_internal_source_file().data(), static_cast<int>(this->_internal_source_file().length()),
+      ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::SERIALIZE,
+      "dscc.AcquireRequest.source_file");
+    target = stream->WriteStringMaybeAliased(
+        4, this->_internal_source_file(), target);
+  }
+
+  // int64 timestamp_unix_ms = 5;
+  if (this->_internal_timestamp_unix_ms() != 0) {
+    target = stream->EnsureSpace(target);
+    target = ::_pbi::WireFormatLite::WriteInt64ToArray(5, this->_internal_timestamp_unix_ms(), target);
   }
 
   if (PROTOBUF_PREDICT_FALSE(_internal_metadata_.have_unknown_fields())) {
@@ -782,11 +880,30 @@ size_t AcquireRequest::ByteSizeLong() const {
     total_size += data_size;
   }
 
-  // string tx_id = 1;
-  if (!this->_internal_tx_id().empty()) {
+  // string agent_id = 1;
+  if (!this->_internal_agent_id().empty()) {
     total_size += 1 +
       ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::StringSize(
-        this->_internal_tx_id());
+        this->_internal_agent_id());
+  }
+
+  // string payload_text = 3;
+  if (!this->_internal_payload_text().empty()) {
+    total_size += 1 +
+      ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::StringSize(
+        this->_internal_payload_text());
+  }
+
+  // string source_file = 4;
+  if (!this->_internal_source_file().empty()) {
+    total_size += 1 +
+      ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::StringSize(
+        this->_internal_source_file());
+  }
+
+  // int64 timestamp_unix_ms = 5;
+  if (this->_internal_timestamp_unix_ms() != 0) {
+    total_size += ::_pbi::WireFormatLite::Int64SizePlusOne(this->_internal_timestamp_unix_ms());
   }
 
   return MaybeComputeUnknownFieldsSize(total_size, &_impl_._cached_size_);
@@ -808,8 +925,17 @@ void AcquireRequest::MergeImpl(::PROTOBUF_NAMESPACE_ID::Message& to_msg, const :
   (void) cached_has_bits;
 
   _this->_impl_.embedding_.MergeFrom(from._impl_.embedding_);
-  if (!from._internal_tx_id().empty()) {
-    _this->_internal_set_tx_id(from._internal_tx_id());
+  if (!from._internal_agent_id().empty()) {
+    _this->_internal_set_agent_id(from._internal_agent_id());
+  }
+  if (!from._internal_payload_text().empty()) {
+    _this->_internal_set_payload_text(from._internal_payload_text());
+  }
+  if (!from._internal_source_file().empty()) {
+    _this->_internal_set_source_file(from._internal_source_file());
+  }
+  if (from._internal_timestamp_unix_ms() != 0) {
+    _this->_internal_set_timestamp_unix_ms(from._internal_timestamp_unix_ms());
   }
   _this->_internal_metadata_.MergeFrom<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(from._internal_metadata_);
 }
@@ -832,9 +958,18 @@ void AcquireRequest::InternalSwap(AcquireRequest* other) {
   _internal_metadata_.InternalSwap(&other->_internal_metadata_);
   _impl_.embedding_.InternalSwap(&other->_impl_.embedding_);
   ::PROTOBUF_NAMESPACE_ID::internal::ArenaStringPtr::InternalSwap(
-      &_impl_.tx_id_, lhs_arena,
-      &other->_impl_.tx_id_, rhs_arena
+      &_impl_.agent_id_, lhs_arena,
+      &other->_impl_.agent_id_, rhs_arena
   );
+  ::PROTOBUF_NAMESPACE_ID::internal::ArenaStringPtr::InternalSwap(
+      &_impl_.payload_text_, lhs_arena,
+      &other->_impl_.payload_text_, rhs_arena
+  );
+  ::PROTOBUF_NAMESPACE_ID::internal::ArenaStringPtr::InternalSwap(
+      &_impl_.source_file_, lhs_arena,
+      &other->_impl_.source_file_, rhs_arena
+  );
+  swap(_impl_.timestamp_unix_ms_, other->_impl_.timestamp_unix_ms_);
 }
 
 ::PROTOBUF_NAMESPACE_ID::Metadata AcquireRequest::GetMetadata() const {
@@ -1089,16 +1224,16 @@ ReleaseRequest::ReleaseRequest(const ReleaseRequest& from)
   : ::PROTOBUF_NAMESPACE_ID::Message() {
   ReleaseRequest* const _this = this; (void)_this;
   new (&_impl_) Impl_{
-      decltype(_impl_.tx_id_){}
+      decltype(_impl_.agent_id_){}
     , /*decltype(_impl_._cached_size_)*/{}};
 
   _internal_metadata_.MergeFrom<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(from._internal_metadata_);
-  _impl_.tx_id_.InitDefault();
+  _impl_.agent_id_.InitDefault();
   #ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
-    _impl_.tx_id_.Set("", GetArenaForAllocation());
+    _impl_.agent_id_.Set("", GetArenaForAllocation());
   #endif // PROTOBUF_FORCE_COPY_DEFAULT_STRING
-  if (!from._internal_tx_id().empty()) {
-    _this->_impl_.tx_id_.Set(from._internal_tx_id(), 
+  if (!from._internal_agent_id().empty()) {
+    _this->_impl_.agent_id_.Set(from._internal_agent_id(), 
       _this->GetArenaForAllocation());
   }
   // @@protoc_insertion_point(copy_constructor:dscc.ReleaseRequest)
@@ -1109,12 +1244,12 @@ inline void ReleaseRequest::SharedCtor(
   (void)arena;
   (void)is_message_owned;
   new (&_impl_) Impl_{
-      decltype(_impl_.tx_id_){}
+      decltype(_impl_.agent_id_){}
     , /*decltype(_impl_._cached_size_)*/{}
   };
-  _impl_.tx_id_.InitDefault();
+  _impl_.agent_id_.InitDefault();
   #ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
-    _impl_.tx_id_.Set("", GetArenaForAllocation());
+    _impl_.agent_id_.Set("", GetArenaForAllocation());
   #endif // PROTOBUF_FORCE_COPY_DEFAULT_STRING
 }
 
@@ -1129,7 +1264,7 @@ ReleaseRequest::~ReleaseRequest() {
 
 inline void ReleaseRequest::SharedDtor() {
   GOOGLE_DCHECK(GetArenaForAllocation() == nullptr);
-  _impl_.tx_id_.Destroy();
+  _impl_.agent_id_.Destroy();
 }
 
 void ReleaseRequest::SetCachedSize(int size) const {
@@ -1142,7 +1277,7 @@ void ReleaseRequest::Clear() {
   // Prevent compiler warnings about cached_has_bits being unused
   (void) cached_has_bits;
 
-  _impl_.tx_id_.ClearToEmpty();
+  _impl_.agent_id_.ClearToEmpty();
   _internal_metadata_.Clear<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>();
 }
 
@@ -1152,13 +1287,13 @@ const char* ReleaseRequest::_InternalParse(const char* ptr, ::_pbi::ParseContext
     uint32_t tag;
     ptr = ::_pbi::ReadTag(ptr, &tag);
     switch (tag >> 3) {
-      // string tx_id = 1;
+      // string agent_id = 1;
       case 1:
         if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 10)) {
-          auto str = _internal_mutable_tx_id();
+          auto str = _internal_mutable_agent_id();
           ptr = ::_pbi::InlineGreedyStringParser(str, ptr, ctx);
           CHK_(ptr);
-          CHK_(::_pbi::VerifyUTF8(str, "dscc.ReleaseRequest.tx_id"));
+          CHK_(::_pbi::VerifyUTF8(str, "dscc.ReleaseRequest.agent_id"));
         } else
           goto handle_unusual;
         continue;
@@ -1191,14 +1326,14 @@ uint8_t* ReleaseRequest::_InternalSerialize(
   uint32_t cached_has_bits = 0;
   (void) cached_has_bits;
 
-  // string tx_id = 1;
-  if (!this->_internal_tx_id().empty()) {
+  // string agent_id = 1;
+  if (!this->_internal_agent_id().empty()) {
     ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::VerifyUtf8String(
-      this->_internal_tx_id().data(), static_cast<int>(this->_internal_tx_id().length()),
+      this->_internal_agent_id().data(), static_cast<int>(this->_internal_agent_id().length()),
       ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::SERIALIZE,
-      "dscc.ReleaseRequest.tx_id");
+      "dscc.ReleaseRequest.agent_id");
     target = stream->WriteStringMaybeAliased(
-        1, this->_internal_tx_id(), target);
+        1, this->_internal_agent_id(), target);
   }
 
   if (PROTOBUF_PREDICT_FALSE(_internal_metadata_.have_unknown_fields())) {
@@ -1217,11 +1352,11 @@ size_t ReleaseRequest::ByteSizeLong() const {
   // Prevent compiler warnings about cached_has_bits being unused
   (void) cached_has_bits;
 
-  // string tx_id = 1;
-  if (!this->_internal_tx_id().empty()) {
+  // string agent_id = 1;
+  if (!this->_internal_agent_id().empty()) {
     total_size += 1 +
       ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::StringSize(
-        this->_internal_tx_id());
+        this->_internal_agent_id());
   }
 
   return MaybeComputeUnknownFieldsSize(total_size, &_impl_._cached_size_);
@@ -1242,8 +1377,8 @@ void ReleaseRequest::MergeImpl(::PROTOBUF_NAMESPACE_ID::Message& to_msg, const :
   uint32_t cached_has_bits = 0;
   (void) cached_has_bits;
 
-  if (!from._internal_tx_id().empty()) {
-    _this->_internal_set_tx_id(from._internal_tx_id());
+  if (!from._internal_agent_id().empty()) {
+    _this->_internal_set_agent_id(from._internal_agent_id());
   }
   _this->_internal_metadata_.MergeFrom<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(from._internal_metadata_);
 }
@@ -1265,8 +1400,8 @@ void ReleaseRequest::InternalSwap(ReleaseRequest* other) {
   auto* rhs_arena = other->GetArenaForAllocation();
   _internal_metadata_.InternalSwap(&other->_internal_metadata_);
   ::PROTOBUF_NAMESPACE_ID::internal::ArenaStringPtr::InternalSwap(
-      &_impl_.tx_id_, lhs_arena,
-      &other->_impl_.tx_id_, rhs_arena
+      &_impl_.agent_id_, lhs_arena,
+      &other->_impl_.agent_id_, rhs_arena
   );
 }
 

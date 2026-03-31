@@ -1,373 +1,319 @@
-# DSCC (Distributed Semantic Concurrency Control)
+# DSCC End-to-End Demo
 
-Semantic lock manager / guard service prototype for coordinating concurrent writes to a vector database.
+## 1. Architecture
 
-Authors:
-- Ashwattha Phatak
-- Ayush Gala
+Current end-to-end flow:
 
-## A. Project Overview
+`demo_inputs/*.txt -> Ollama embeddings -> dscc-node gRPC AcquireGuard -> ActiveLockTable -> Qdrant write -> lock release`
 
-DSCC is intended to act as a distributed semantic concurrency control guard in front of vector DB writes. In the current repository state, the implemented vertical slice is a C++ gRPC server with a `LockService` API (`Ping`, `AcquireGuard`, `ReleaseGuard`) and stubbed responses for guard acquisition/release. A Docker Compose setup also starts Qdrant and multiple DSCC nodes, but DSCC is not yet wired to Qdrant or any distributed coordination logic.
+Main components:
 
-In-scope today (implemented in repo):
-- gRPC service contract for lock/guard operations (`proto/dscc.proto`)
-- C++ gRPC server executable (`dscc-node`)
-- Docker build/compose scaffolding for multiple DSCC nodes + Qdrant
+- `src/e2e_bench.cpp`
+  - the primary demo and validation harness
+  - starts Docker services, requests embeddings, sends gRPC requests, validates Qdrant writes
+- `src/lock_service_impl.cpp`
+  - gRPC server implementation
+  - applies semantic lock acquisition, writes vectors to Qdrant, releases the lock
+- `src/active_lock_table.{h,cpp}`
+  - in-memory semantic lock table
+  - blocks requests whose cosine similarity is `>= theta`
+- `docker-compose.yml`
+  - runs:
+    - `embedding-service` via `ollama/ollama:latest`
+    - `qdrant`
+    - `dscc-node`
+- `demo_inputs/A.txt` through `demo_inputs/E.txt`
+  - editable agent payloads used by the demo
 
-Out-of-scope today (not implemented yet):
-- Real lock manager semantics / conflict detection
-- Distributed coordination between DSCC nodes
-- Actual vector DB write interception/integration (Qdrant is present in compose only)
-- Automated tests / benchmarks / persistence / observability beyond stdout logs
+Locking model:
 
-## B. Current Status (What’s Done vs Not Done)
+- each request gets an embedding vector
+- if its similarity to an active lock is `>= theta`, it waits
+- once the write finishes, the lock is released
 
-### DONE
-- [x] gRPC/protobuf contract defined for `LockService` with `Ping`, `AcquireGuard`, `ReleaseGuard` (`proto/dscc.proto`)
-- [x] Generated protobuf/gRPC C++ sources checked into `proto/`
-- [x] `dscc-node` C++ server scaffold implemented and builds with CMake (`CMakeLists.txt`)
-- [x] Server binds to configurable `PORT` env var (default `50051`) in `src/main.cpp`
-- [x] `Ping` RPC implemented as a simple echo-style health check (`pong to <from_node>`)
-- [x] `AcquireGuard` RPC stub returns `granted=true` and message `"stub: granted"`
-- [x] `ReleaseGuard` RPC stub returns `success=true`
-- [x] Dockerfile builds and runs the C++ server on Ubuntu 22.04 base
-- [x] `docker-compose.yml` defines Qdrant + 3 DSCC node containers
+## 2. Build
 
-### TODO
-- [ ] Implement actual `LockManager` / semantic conflict checks (currently no locking state is stored)
-- [ ] Connect DSCC guard decisions to vector DB operations (Qdrant service is not used by server code)
-- [ ] Add distributed coordination / replication / consensus (no inter-node communication code exists)
-- [ ] Add request validation and richer error handling (RPC stubs always succeed)
-- [ ] Add tests (unit/integration) and benchmark harnesses
-- [ ] Add config wiring (`src/node_config.h` exists but is not used by `main.cpp`)
+Build the current end-to-end target:
 
-## C. Architecture (As Implemented Today)
+```bash
+cmake -S . -B /tmp/dslm_build
+cmake --build /tmp/dslm_build --target dscc-e2e-bench -j"$(nproc)"
+```
+
+This is the main executable you should use for the project demo:
+
+```bash
+/tmp/dslm_build/dscc-e2e-bench
+```
+
+## 3. Run the Current Test Structure
+
+The current testing structure is the real end-to-end bench. It does all of the following:
+
+- starts Docker services
+- ensures the Ollama embedding model is available
+- reads `demo_inputs/*.txt`
+- generates real embeddings
+- prints pairwise similarity scores
+- sends concurrent real `AcquireGuard` gRPC requests
+- writes vectors and payload metadata into Qdrant
+- validates Qdrant point counts and payloads
+
+Run with defaults:
+
+```bash
+/tmp/dslm_build/dscc-e2e-bench
+```
+
+Run with automatic teardown after the demo:
+
+```bash
+E2E_TEARDOWN=1 /tmp/dslm_build/dscc-e2e-bench
+```
+
+Useful environment variables:
+
+- `DSCC_THETA`
+  - semantic conflict threshold
+  - default: `0.78`
+- `DSCC_LOCK_HOLD_MS`
+  - how long the server keeps the lock after a successful write
+  - default: `750`
+- `EMBEDDING_IMAGE`
+  - embedding service image
+  - default: `ollama/ollama:latest`
+- `EMBEDDING_MODEL_ID`
+  - Ollama model used for embeddings
+  - default: `all-minilm:latest`
+- `QDRANT_COLLECTION`
+  - Qdrant collection name
+  - default: `dscc_memory_e2e`
+- `E2E_TEARDOWN`
+  - set to `1` to bring the stack down automatically on exit
+
+Examples:
+
+```bash
+/tmp/dslm_build/dscc-e2e-bench
+```
+
+```bash
+E2E_TEARDOWN=1 /tmp/dslm_build/dscc-e2e-bench
+```
+
+```bash
+DSCC_THETA=0.30 /tmp/dslm_build/dscc-e2e-bench
+```
+
+```bash
+DSCC_THETA=0.95 DSCC_LOCK_HOLD_MS=1000 /tmp/dslm_build/dscc-e2e-bench
+```
+
+## 4. Edit the Agent Inputs
+
+The text files below are the actual payloads used by the demo:
+
+- `demo_inputs/A.txt`
+- `demo_inputs/B.txt`
+- `demo_inputs/C.txt`
+- `demo_inputs/D.txt`
+- `demo_inputs/E.txt`
+
+Change those files to test new semantic overlaps or non-overlaps.
+
+Current intent of the seeded files:
+
+- `A` and `B`
+  - invoice-processing conflict pair
+- `D` and `E`
+  - payroll-summary conflict pair
+- `C`
+  - distinct server-reboot task
+
+## 5. How to Read `dscc-e2e-bench`
+
+The output is organized in this order:
+
+### Runtime Configuration
+
+Shows:
+
+- project path
+- embedding image and model
+- `theta`
+- lock hold time
+- Qdrant collection
+
+This tells you exactly what environment the run used.
+
+### Pairwise Similarity Matrix
+
+Example:
 
 ```text
-grpcurl / client
-      |
-      v
-+---------------------------+
-| DSCC Node (`dscc-node`)   |
-| - gRPC server             |
-| - LockServiceImpl         |
-| - stub guard responses    |
-+---------------------------+
-      |
-      v
-[Future LockManager / state]
-      |
-      v
-[Future vector DB integration (Qdrant)]
+       A   1.000   0.900   0.124   0.377   0.411
 ```
 
-### Layer Responsibilities
+How to read it:
 
-Client (`grpcurl`, app client):
-- Sends gRPC requests to `dscc.LockService`
-- Can test RPCs directly with `-proto proto/dscc.proto` (reflection not required)
+- each row/column is one text file
+- each value is cosine similarity between two payloads
+- if a value is greater than or equal to `theta`, those two agents are expected to conflict
 
-DSCC Node (implemented today):
-- Starts a gRPC server and registers `LockServiceImpl` (`src/main.cpp`)
-- Handles RPC requests with stub logic (`src/lock_service_impl.cpp`)
-- Logs server bind address to stdout
+Examples with the seeded files:
 
-Future LockManager / vector DB integration (not implemented):
-- Lock state, queues, conflict detection, release semantics
-- Forwarding/guarding actual vector DB writes
-- Inter-node coordination and consistency
+- `A-B = 0.900`
+  - strong semantic overlap
+- `D-E = 0.918`
+  - strong semantic overlap
+- `A-C = 0.124`
+  - weak overlap
 
-## D. Repository Map (Code Walkthrough)
+### Scenario Title
 
-### Top-level files
+Each scenario header explains what the scenario is testing, for example:
 
-`CMakeLists.txt`
-- Builds `dscc-node` from `src/*.cpp` plus checked-in generated protobuf sources in `proto/`
-- Finds `Protobuf` and `gRPC` via system packages
-- Links `gRPC::grpc++`, `gRPC::grpc++_reflection`, and `protobuf::libprotobuf`
-- Important: CMake does **not** generate protobuf code; it compiles the generated files already in `proto/`
+- `Scenario One: Agents A and B describe the same invoice`
+- `Scenario Two: Agents A, C, and D run together`
 
-`docker-compose.yml`
-- Starts one Qdrant container (`6333`) and three DSCC nodes (`5001`, `5002`, `5003`)
-- Sets `NODE_ID` and `PORT` env vars for each DSCC node
-- Current role: deployment scaffold / local demo topology (no DSCC↔Qdrant integration in code yet)
+### Timeline
 
-`README.md`
-- Project documentation (this file)
+This is the most important part of the demo.
 
-### `proto/`
+Each timeline line is printed in time order and shows when an agent:
 
-`proto/dscc.proto`
-- Source-of-truth gRPC contract for the DSCC API
-- Defines:
-  - `Ping(PingRequest) -> PingResponse`
-  - `AcquireGuard(AcquireRequest) -> AcquireResponse`
-  - `ReleaseGuard(ReleaseRequest) -> ReleaseResponse`
-- `AcquireRequest` currently contains `tx_id` and `embedding` (repeated float)
+- submitted text
+- entered the embedding model
+- left the embedding model
+- entered DSLM
+- reached the DSLM server
+- acquired the semantic lock
+- finished the Qdrant write
+- released the semantic lock
 
-`proto/dscc.pb.h`, `proto/dscc.pb.cc`
-- Generated protobuf message code from `dscc.proto`
-- Do not edit by hand; regenerate when proto changes
+When there is a conflict, the timeline will explicitly say:
 
-`proto/dscc.grpc.pb.h`, `proto/dscc.grpc.pb.cc`
-- Generated gRPC service stubs/base classes from `dscc.proto`
-- `LockServiceImpl` derives from the generated service base
+- how long the agent waited
+- which agent blocked it
+- what similarity score caused the block
+- which threshold was applied
 
-### `src/`
+Example interpretation:
 
-`src/main.cpp`
-- Entry point for `dscc-node`
-- Reads `PORT` env var (default `50051`)
-- Enables gRPC health check + reflection plugin
-- Registers `LockServiceImpl` and blocks on `server->Wait()`
+```text
+Agent A acquired semantic lock after waiting 754ms because Agent B matched at similarity 0.900 >= theta 0.300
+```
 
-`src/lock_service_impl.h`
-- Declares the gRPC service implementation class
-- Overrides `Ping`, `AcquireGuard`, `ReleaseGuard`
+This means:
 
-`src/lock_service_impl.cpp`
-- Current request handlers
-- `Ping`: returns `"pong to <from_node>"`
-- `AcquireGuard`: always returns granted (stub)
-- `ReleaseGuard`: always returns success (stub)
+- Agent A was blocked in the lock manager
+- Agent B was the conflicting active lock
+- the conflict score was `0.900`
+- since `0.900 >= 0.300`, Agent A had to wait
 
-`src/node_config.h`
-- `NodeConfig` struct reading `NODE_ID` / `PORT` from environment
-- Currently not referenced by the running server path (`main.cpp` uses `PORT` directly)
-- Note: header default port is `5001`, but `main.cpp` default is `50051`; runtime behavior follows `main.cpp`
+### Agent Recap
 
-### `docker/`
+Each agent gets a short recap with:
 
-`docker/Dockerfile`
-- Ubuntu 22.04-based image
-- Installs build dependencies (`cmake`, protobuf, gRPC dev packages, compiler toolchain)
-- Copies repo, builds `dscc-node`, and runs `./build/dscc-node`
+- embedding duration
+- DSLM wait time
+- blocking agent and similarity, if any
+- Qdrant write-complete time
+- final result
 
-### `build/` (generated locally)
+This is the easiest section to use in a live presentation.
 
-`build/`
-- CMake build output directory (generated)
-- Not source of truth; safe to recreate
+### Qdrant Validation
 
-### Start Here (New Contributor)
+After each scenario, the bench verifies:
 
-Read these first, in order:
-1. `proto/dscc.proto` (API surface and request/response types)
-2. `src/lock_service_impl.cpp` (current behavior and stubs)
-3. `src/main.cpp` (server boot + runtime config)
-4. `CMakeLists.txt` (build assumptions and linked deps)
-5. `docker-compose.yml` (intended multi-node local topology)
+- point count in Qdrant
+- payload presence in Qdrant
 
-## E. Build + Run (Ubuntu 22)
+If those checks pass, the vector DB write path worked for that scenario.
 
-### Prerequisites (Ubuntu 22.04, ARM64/x86_64)
+## 6. Threshold Tuning
 
-Install system packages used by the current CMake build:
+The threshold controls how aggressively the semantic lock manager blocks requests.
+
+Use:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y \
-  build-essential \
-  cmake \
-  protobuf-compiler \
-  libprotobuf-dev \
-  libgrpc++-dev \
-  libgrpc-dev \
-  grpc-proto \
-  protobuf-compiler-grpc
+DSCC_THETA=<value> /tmp/dslm_build/dscc-e2e-bench
 ```
 
-Notes:
-- The repo compiles on Ubuntu 22 with system `gRPC`/`protobuf` packages.
-- `protobuf-compiler-grpc` provides `grpc_cpp_plugin` needed for manual regeneration.
-- Generated protobuf/grpc C++ files are checked into `proto/`, so regeneration is only needed when `proto/dscc.proto` changes.
-
-### Generate protobuf/gRPC C++ code (only when proto changes)
+Examples:
 
 ```bash
-protoc -I proto \
-  --cpp_out=proto \
-  --grpc_out=proto \
-  --plugin=protoc-gen-grpc="$(which grpc_cpp_plugin)" \
-  proto/dscc.proto
+DSCC_THETA=0.95 /tmp/dslm_build/dscc-e2e-bench
+DSCC_THETA=0.78 /tmp/dslm_build/dscc-e2e-bench
+DSCC_THETA=0.30 /tmp/dslm_build/dscc-e2e-bench
+DSCC_THETA=0.10 /tmp/dslm_build/dscc-e2e-bench
 ```
 
-Expected updated files:
-- `proto/dscc.pb.h`
-- `proto/dscc.pb.cc`
-- `proto/dscc.grpc.pb.h`
-- `proto/dscc.grpc.pb.cc`
+How lower thresholds change behavior:
 
-### Build with CMake
+- at `0.78`
+  - only the strongest overlaps block
+- at `0.30`
+  - weaker semantic relationships can start blocking too
+- at `0.10`
+  - the lock manager becomes very aggressive
+
+Important:
+
+- if you lower `theta`, a scenario that used to be “distinct” may stop being distinct
+- this is expected behavior, not necessarily a bug
+
+## 7. Docker Behavior and Cleanup
+
+Start the stack manually:
 
 ```bash
-cmake -S . -B build
-cmake --build build -j"$(nproc)"
+docker compose up -d --build qdrant embedding-service dscc-node
 ```
 
-Binary output:
-- `build/dscc-node`
-
-### Run the server
-
-Default port (`50051`):
+Stop and remove the stack:
 
 ```bash
-./build/dscc-node
+docker compose down
 ```
 
-Custom port:
+Remove containers and volumes:
 
 ```bash
-PORT=5001 ./build/dscc-node
+docker compose down -v
 ```
 
-What to expect on stdout:
-- `Server listening on 0.0.0.0:<PORT>`
+Current Qdrant persistence behavior:
 
-### Test RPCs with `grpcurl` (without reflection)
+- Qdrant does not mount a host data volume in this repo
+- if the Qdrant container is removed, its data is effectively gone
+- the bench also deletes the collection before each scenario
 
-Install `grpcurl` (one option):
+## 8. Layer Contract and Assumptions
 
-```bash
-sudo apt-get install -y grpcurl
-```
+Assumptions:
 
-If `grpcurl` is not in your apt repo on Ubuntu 22, install from release binary or Go toolchain, then run:
+- the caller sends a valid `agent_id`, payload text, source file, timestamp, and embedding
+- embeddings compared for overlap come from the same model and vector space
+- Qdrant is reachable over HTTP
+- semantic conflicts are decided by cosine similarity against `theta`
 
-Ping:
+Responsibilities this layer does not take:
 
-```bash
-grpcurl -plaintext \
-  -proto proto/dscc.proto \
-  -d '{"from_node":"cli"}' \
-  localhost:50051 \
-  dscc.LockService/Ping
-```
+- no agent planning or orchestration
+- no LLM reasoning layer
+- no distributed coordination across multiple DSCC nodes
+- no persistence of active lock state across process restarts
 
-AcquireGuard (stubbed, always granted today):
+Upper-layer expectation:
 
-```bash
-grpcurl -plaintext \
-  -proto proto/dscc.proto \
-  -d '{"tx_id":"tx-1","embedding":[0.1,0.2,0.3]}' \
-  localhost:50051 \
-  dscc.LockService/AcquireGuard
-```
+- decide which text should be embedded
+- supply meaningful agent identity
+- choose a threshold that matches the desired blocking behavior
 
-ReleaseGuard (stubbed, always success today):
+Lower-layer expectation:
 
-```bash
-grpcurl -plaintext \
-  -proto proto/dscc.proto \
-  -d '{"tx_id":"tx-1"}' \
-  localhost:50051 \
-  dscc.LockService/ReleaseGuard
-```
-
-Expected current behavior:
-- `Ping` returns a `"pong to ..."` message
-- `AcquireGuard` returns `{"granted": true, "message": "stub: granted"}`
-- `ReleaseGuard` returns `{"success": true}`
-
-### Docker Compose (local topology scaffold)
-
-Bring up Qdrant + three DSCC nodes:
-
-```bash
-docker compose up --build
-```
-
-Ports:
-- Qdrant: `6333`
-- DSCC node 1: `5001`
-- DSCC node 2: `5002`
-- DSCC node 3: `5003`
-
-Important current limitation:
-- Qdrant is started by Compose, but DSCC server code does not yet connect to or call Qdrant.
-
-## F. Development Workflow
-
-Typical iteration loop:
-1. Edit `proto/dscc.proto` (API) or `src/*.cpp` (server behavior)
-2. If proto changed, regenerate generated files in `proto/`
-3. Rebuild with CMake
-4. Run `./build/dscc-node` (set `PORT` if needed)
-5. Test RPCs using `grpcurl -proto proto/dscc.proto ...`
-
-Logs / runtime output:
-- Server logs are printed to stdout/stderr
-- gRPC startup/bind errors will also appear on stderr
-
-Environment variables used today:
-- `PORT`: used by `src/main.cpp` to choose listening port (default `50051`)
-- `NODE_ID`: set in Docker Compose, but not currently used by `main.cpp` / service logic
-
-## G. Milestones & Timeline (From Proposal)
-
-The project proposal/timeline was not included in the request (the prompt contains a placeholder: `<PASTE THE FULL PROJECT PROPOSAL DOCUMENT HERE, INCLUDING TIMELINE>`). This section is intentionally left as a tracked template so it can be filled in accurately once the proposal is pasted.
-
-### Timeline Import Status
-
-- [ ] Proposal timeline pasted into issue/chat
-- [ ] Milestones converted into repo task checklist
-- [ ] File/module mapping added for each milestone
-- [ ] Deliverables/test/demo commands added per milestone
-
-### Milestone Template (fill from proposal)
-
-- [ ] **Milestone 1: <proposal title> (<date range>)**
-  - Done looks like: `<acceptance criteria>`
-  - Likely files/modules: `proto/...`, `src/...`, `CMakeLists.txt`, `docker-compose.yml`
-  - Deliverables: `<tests / benchmark / demo commands>`
-
-- [ ] **Milestone 2: <proposal title> (<date range>)**
-  - Done looks like: `<acceptance criteria>`
-  - Likely files/modules: `src/...`
-  - Deliverables: `<tests / benchmark / demo commands>`
-
-- [ ] **Milestone 3: <proposal title> (<date range>)**
-  - Done looks like: `<acceptance criteria>`
-  - Likely files/modules: `src/...`, `proto/...`
-  - Deliverables: `<tests / benchmark / demo commands>`
-
-### Suggested Next Engineering Work (until timeline is pasted)
-
-- [ ] Implement in-memory lock state / guard table behind `AcquireGuard` and `ReleaseGuard`
-- [ ] Add conflict decision logic using request embeddings (even basic placeholder heuristic is better than unconditional grant)
-- [ ] Wire `NODE_ID` / `NodeConfig` into `main.cpp` and service logging
-- [ ] Add unit tests for service methods and an integration test using `grpcurl` or a small client
-- [ ] Decide how DSCC will interface with Qdrant (proxy, sidecar, or client-library integration)
-
-## H. How to Contribute (Teammate Onboarding)
-
-### If You’re New, Do This First
-
-1. Install dependencies (Ubuntu 22 packages listed above)
-2. Build the project:
-   ```bash
-   cmake -S . -B build
-   cmake --build build -j"$(nproc)"
-   ```
-3. Run the server:
-   ```bash
-   ./build/dscc-node
-   ```
-4. In another shell, run `grpcurl` smoke tests (use the commands in Section E)
-
-### Where to Implement Next (based on current repo state)
-
-Priority areas:
-- `src/lock_service_impl.cpp`: replace stubbed grant/release responses with real stateful logic
-- `src/` (new files likely needed): lock manager, queues, conflict checks, in-memory state
-- `proto/dscc.proto`: expand API only if required by the lock manager/distributed protocol
-- `src/main.cpp` + config handling: wire `NodeConfig`, structured logging, runtime options
-- Future distributed coordination modules (not present yet): inter-node RPC/client code, replication/consensus
-
-### Contribution Notes
-
-- Treat `proto/dscc.proto` as the API source of truth
-- Do not hand-edit generated files in `proto/`; regenerate them
-- Keep README/status docs aligned with what is actually implemented (especially stubs vs real logic)
+- Qdrant accepts vector upserts and metadata payloads
+- the embedding service returns stable fixed-dimension vectors

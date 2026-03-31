@@ -504,7 +504,10 @@ class AcquireRequest final :
 
   enum : int {
     kEmbeddingFieldNumber = 2,
-    kTxIdFieldNumber = 1,
+    kAgentIdFieldNumber = 1,
+    kPayloadTextFieldNumber = 3,
+    kSourceFileFieldNumber = 4,
+    kTimestampUnixMsFieldNumber = 5,
   };
   // repeated float embedding = 2;
   int embedding_size() const;
@@ -528,18 +531,55 @@ class AcquireRequest final :
   ::PROTOBUF_NAMESPACE_ID::RepeatedField< float >*
       mutable_embedding();
 
-  // string tx_id = 1;
-  void clear_tx_id();
-  const std::string& tx_id() const;
+  // string agent_id = 1;
+  void clear_agent_id();
+  const std::string& agent_id() const;
   template <typename ArgT0 = const std::string&, typename... ArgT>
-  void set_tx_id(ArgT0&& arg0, ArgT... args);
-  std::string* mutable_tx_id();
-  PROTOBUF_NODISCARD std::string* release_tx_id();
-  void set_allocated_tx_id(std::string* tx_id);
+  void set_agent_id(ArgT0&& arg0, ArgT... args);
+  std::string* mutable_agent_id();
+  PROTOBUF_NODISCARD std::string* release_agent_id();
+  void set_allocated_agent_id(std::string* agent_id);
   private:
-  const std::string& _internal_tx_id() const;
-  inline PROTOBUF_ALWAYS_INLINE void _internal_set_tx_id(const std::string& value);
-  std::string* _internal_mutable_tx_id();
+  const std::string& _internal_agent_id() const;
+  inline PROTOBUF_ALWAYS_INLINE void _internal_set_agent_id(const std::string& value);
+  std::string* _internal_mutable_agent_id();
+  public:
+
+  // string payload_text = 3;
+  void clear_payload_text();
+  const std::string& payload_text() const;
+  template <typename ArgT0 = const std::string&, typename... ArgT>
+  void set_payload_text(ArgT0&& arg0, ArgT... args);
+  std::string* mutable_payload_text();
+  PROTOBUF_NODISCARD std::string* release_payload_text();
+  void set_allocated_payload_text(std::string* payload_text);
+  private:
+  const std::string& _internal_payload_text() const;
+  inline PROTOBUF_ALWAYS_INLINE void _internal_set_payload_text(const std::string& value);
+  std::string* _internal_mutable_payload_text();
+  public:
+
+  // string source_file = 4;
+  void clear_source_file();
+  const std::string& source_file() const;
+  template <typename ArgT0 = const std::string&, typename... ArgT>
+  void set_source_file(ArgT0&& arg0, ArgT... args);
+  std::string* mutable_source_file();
+  PROTOBUF_NODISCARD std::string* release_source_file();
+  void set_allocated_source_file(std::string* source_file);
+  private:
+  const std::string& _internal_source_file() const;
+  inline PROTOBUF_ALWAYS_INLINE void _internal_set_source_file(const std::string& value);
+  std::string* _internal_mutable_source_file();
+  public:
+
+  // int64 timestamp_unix_ms = 5;
+  void clear_timestamp_unix_ms();
+  int64_t timestamp_unix_ms() const;
+  void set_timestamp_unix_ms(int64_t value);
+  private:
+  int64_t _internal_timestamp_unix_ms() const;
+  void _internal_set_timestamp_unix_ms(int64_t value);
   public:
 
   // @@protoc_insertion_point(class_scope:dscc.AcquireRequest)
@@ -551,7 +591,10 @@ class AcquireRequest final :
   typedef void DestructorSkippable_;
   struct Impl_ {
     ::PROTOBUF_NAMESPACE_ID::RepeatedField< float > embedding_;
-    ::PROTOBUF_NAMESPACE_ID::internal::ArenaStringPtr tx_id_;
+    ::PROTOBUF_NAMESPACE_ID::internal::ArenaStringPtr agent_id_;
+    ::PROTOBUF_NAMESPACE_ID::internal::ArenaStringPtr payload_text_;
+    ::PROTOBUF_NAMESPACE_ID::internal::ArenaStringPtr source_file_;
+    int64_t timestamp_unix_ms_;
     mutable ::PROTOBUF_NAMESPACE_ID::internal::CachedSize _cached_size_;
   };
   union { Impl_ _impl_; };
@@ -844,20 +887,20 @@ class ReleaseRequest final :
   // accessors -------------------------------------------------------
 
   enum : int {
-    kTxIdFieldNumber = 1,
+    kAgentIdFieldNumber = 1,
   };
-  // string tx_id = 1;
-  void clear_tx_id();
-  const std::string& tx_id() const;
+  // string agent_id = 1;
+  void clear_agent_id();
+  const std::string& agent_id() const;
   template <typename ArgT0 = const std::string&, typename... ArgT>
-  void set_tx_id(ArgT0&& arg0, ArgT... args);
-  std::string* mutable_tx_id();
-  PROTOBUF_NODISCARD std::string* release_tx_id();
-  void set_allocated_tx_id(std::string* tx_id);
+  void set_agent_id(ArgT0&& arg0, ArgT... args);
+  std::string* mutable_agent_id();
+  PROTOBUF_NODISCARD std::string* release_agent_id();
+  void set_allocated_agent_id(std::string* agent_id);
   private:
-  const std::string& _internal_tx_id() const;
-  inline PROTOBUF_ALWAYS_INLINE void _internal_set_tx_id(const std::string& value);
-  std::string* _internal_mutable_tx_id();
+  const std::string& _internal_agent_id() const;
+  inline PROTOBUF_ALWAYS_INLINE void _internal_set_agent_id(const std::string& value);
+  std::string* _internal_mutable_agent_id();
   public:
 
   // @@protoc_insertion_point(class_scope:dscc.ReleaseRequest)
@@ -868,7 +911,7 @@ class ReleaseRequest final :
   typedef void InternalArenaConstructable_;
   typedef void DestructorSkippable_;
   struct Impl_ {
-    ::PROTOBUF_NAMESPACE_ID::internal::ArenaStringPtr tx_id_;
+    ::PROTOBUF_NAMESPACE_ID::internal::ArenaStringPtr agent_id_;
     mutable ::PROTOBUF_NAMESPACE_ID::internal::CachedSize _cached_size_;
   };
   union { Impl_ _impl_; };
@@ -1141,54 +1184,54 @@ inline void PingResponse::set_allocated_message(std::string* message) {
 
 // AcquireRequest
 
-// string tx_id = 1;
-inline void AcquireRequest::clear_tx_id() {
-  _impl_.tx_id_.ClearToEmpty();
+// string agent_id = 1;
+inline void AcquireRequest::clear_agent_id() {
+  _impl_.agent_id_.ClearToEmpty();
 }
-inline const std::string& AcquireRequest::tx_id() const {
-  // @@protoc_insertion_point(field_get:dscc.AcquireRequest.tx_id)
-  return _internal_tx_id();
+inline const std::string& AcquireRequest::agent_id() const {
+  // @@protoc_insertion_point(field_get:dscc.AcquireRequest.agent_id)
+  return _internal_agent_id();
 }
 template <typename ArgT0, typename... ArgT>
 inline PROTOBUF_ALWAYS_INLINE
-void AcquireRequest::set_tx_id(ArgT0&& arg0, ArgT... args) {
+void AcquireRequest::set_agent_id(ArgT0&& arg0, ArgT... args) {
  
- _impl_.tx_id_.Set(static_cast<ArgT0 &&>(arg0), args..., GetArenaForAllocation());
-  // @@protoc_insertion_point(field_set:dscc.AcquireRequest.tx_id)
+ _impl_.agent_id_.Set(static_cast<ArgT0 &&>(arg0), args..., GetArenaForAllocation());
+  // @@protoc_insertion_point(field_set:dscc.AcquireRequest.agent_id)
 }
-inline std::string* AcquireRequest::mutable_tx_id() {
-  std::string* _s = _internal_mutable_tx_id();
-  // @@protoc_insertion_point(field_mutable:dscc.AcquireRequest.tx_id)
+inline std::string* AcquireRequest::mutable_agent_id() {
+  std::string* _s = _internal_mutable_agent_id();
+  // @@protoc_insertion_point(field_mutable:dscc.AcquireRequest.agent_id)
   return _s;
 }
-inline const std::string& AcquireRequest::_internal_tx_id() const {
-  return _impl_.tx_id_.Get();
+inline const std::string& AcquireRequest::_internal_agent_id() const {
+  return _impl_.agent_id_.Get();
 }
-inline void AcquireRequest::_internal_set_tx_id(const std::string& value) {
+inline void AcquireRequest::_internal_set_agent_id(const std::string& value) {
   
-  _impl_.tx_id_.Set(value, GetArenaForAllocation());
+  _impl_.agent_id_.Set(value, GetArenaForAllocation());
 }
-inline std::string* AcquireRequest::_internal_mutable_tx_id() {
+inline std::string* AcquireRequest::_internal_mutable_agent_id() {
   
-  return _impl_.tx_id_.Mutable(GetArenaForAllocation());
+  return _impl_.agent_id_.Mutable(GetArenaForAllocation());
 }
-inline std::string* AcquireRequest::release_tx_id() {
-  // @@protoc_insertion_point(field_release:dscc.AcquireRequest.tx_id)
-  return _impl_.tx_id_.Release();
+inline std::string* AcquireRequest::release_agent_id() {
+  // @@protoc_insertion_point(field_release:dscc.AcquireRequest.agent_id)
+  return _impl_.agent_id_.Release();
 }
-inline void AcquireRequest::set_allocated_tx_id(std::string* tx_id) {
-  if (tx_id != nullptr) {
+inline void AcquireRequest::set_allocated_agent_id(std::string* agent_id) {
+  if (agent_id != nullptr) {
     
   } else {
     
   }
-  _impl_.tx_id_.SetAllocated(tx_id, GetArenaForAllocation());
+  _impl_.agent_id_.SetAllocated(agent_id, GetArenaForAllocation());
 #ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
-  if (_impl_.tx_id_.IsDefault()) {
-    _impl_.tx_id_.Set("", GetArenaForAllocation());
+  if (_impl_.agent_id_.IsDefault()) {
+    _impl_.agent_id_.Set("", GetArenaForAllocation());
   }
 #endif // PROTOBUF_FORCE_COPY_DEFAULT_STRING
-  // @@protoc_insertion_point(field_set_allocated:dscc.AcquireRequest.tx_id)
+  // @@protoc_insertion_point(field_set_allocated:dscc.AcquireRequest.agent_id)
 }
 
 // repeated float embedding = 2;
@@ -1236,6 +1279,126 @@ inline ::PROTOBUF_NAMESPACE_ID::RepeatedField< float >*
 AcquireRequest::mutable_embedding() {
   // @@protoc_insertion_point(field_mutable_list:dscc.AcquireRequest.embedding)
   return _internal_mutable_embedding();
+}
+
+// string payload_text = 3;
+inline void AcquireRequest::clear_payload_text() {
+  _impl_.payload_text_.ClearToEmpty();
+}
+inline const std::string& AcquireRequest::payload_text() const {
+  // @@protoc_insertion_point(field_get:dscc.AcquireRequest.payload_text)
+  return _internal_payload_text();
+}
+template <typename ArgT0, typename... ArgT>
+inline PROTOBUF_ALWAYS_INLINE
+void AcquireRequest::set_payload_text(ArgT0&& arg0, ArgT... args) {
+ 
+ _impl_.payload_text_.Set(static_cast<ArgT0 &&>(arg0), args..., GetArenaForAllocation());
+  // @@protoc_insertion_point(field_set:dscc.AcquireRequest.payload_text)
+}
+inline std::string* AcquireRequest::mutable_payload_text() {
+  std::string* _s = _internal_mutable_payload_text();
+  // @@protoc_insertion_point(field_mutable:dscc.AcquireRequest.payload_text)
+  return _s;
+}
+inline const std::string& AcquireRequest::_internal_payload_text() const {
+  return _impl_.payload_text_.Get();
+}
+inline void AcquireRequest::_internal_set_payload_text(const std::string& value) {
+  
+  _impl_.payload_text_.Set(value, GetArenaForAllocation());
+}
+inline std::string* AcquireRequest::_internal_mutable_payload_text() {
+  
+  return _impl_.payload_text_.Mutable(GetArenaForAllocation());
+}
+inline std::string* AcquireRequest::release_payload_text() {
+  // @@protoc_insertion_point(field_release:dscc.AcquireRequest.payload_text)
+  return _impl_.payload_text_.Release();
+}
+inline void AcquireRequest::set_allocated_payload_text(std::string* payload_text) {
+  if (payload_text != nullptr) {
+    
+  } else {
+    
+  }
+  _impl_.payload_text_.SetAllocated(payload_text, GetArenaForAllocation());
+#ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
+  if (_impl_.payload_text_.IsDefault()) {
+    _impl_.payload_text_.Set("", GetArenaForAllocation());
+  }
+#endif // PROTOBUF_FORCE_COPY_DEFAULT_STRING
+  // @@protoc_insertion_point(field_set_allocated:dscc.AcquireRequest.payload_text)
+}
+
+// string source_file = 4;
+inline void AcquireRequest::clear_source_file() {
+  _impl_.source_file_.ClearToEmpty();
+}
+inline const std::string& AcquireRequest::source_file() const {
+  // @@protoc_insertion_point(field_get:dscc.AcquireRequest.source_file)
+  return _internal_source_file();
+}
+template <typename ArgT0, typename... ArgT>
+inline PROTOBUF_ALWAYS_INLINE
+void AcquireRequest::set_source_file(ArgT0&& arg0, ArgT... args) {
+ 
+ _impl_.source_file_.Set(static_cast<ArgT0 &&>(arg0), args..., GetArenaForAllocation());
+  // @@protoc_insertion_point(field_set:dscc.AcquireRequest.source_file)
+}
+inline std::string* AcquireRequest::mutable_source_file() {
+  std::string* _s = _internal_mutable_source_file();
+  // @@protoc_insertion_point(field_mutable:dscc.AcquireRequest.source_file)
+  return _s;
+}
+inline const std::string& AcquireRequest::_internal_source_file() const {
+  return _impl_.source_file_.Get();
+}
+inline void AcquireRequest::_internal_set_source_file(const std::string& value) {
+  
+  _impl_.source_file_.Set(value, GetArenaForAllocation());
+}
+inline std::string* AcquireRequest::_internal_mutable_source_file() {
+  
+  return _impl_.source_file_.Mutable(GetArenaForAllocation());
+}
+inline std::string* AcquireRequest::release_source_file() {
+  // @@protoc_insertion_point(field_release:dscc.AcquireRequest.source_file)
+  return _impl_.source_file_.Release();
+}
+inline void AcquireRequest::set_allocated_source_file(std::string* source_file) {
+  if (source_file != nullptr) {
+    
+  } else {
+    
+  }
+  _impl_.source_file_.SetAllocated(source_file, GetArenaForAllocation());
+#ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
+  if (_impl_.source_file_.IsDefault()) {
+    _impl_.source_file_.Set("", GetArenaForAllocation());
+  }
+#endif // PROTOBUF_FORCE_COPY_DEFAULT_STRING
+  // @@protoc_insertion_point(field_set_allocated:dscc.AcquireRequest.source_file)
+}
+
+// int64 timestamp_unix_ms = 5;
+inline void AcquireRequest::clear_timestamp_unix_ms() {
+  _impl_.timestamp_unix_ms_ = int64_t{0};
+}
+inline int64_t AcquireRequest::_internal_timestamp_unix_ms() const {
+  return _impl_.timestamp_unix_ms_;
+}
+inline int64_t AcquireRequest::timestamp_unix_ms() const {
+  // @@protoc_insertion_point(field_get:dscc.AcquireRequest.timestamp_unix_ms)
+  return _internal_timestamp_unix_ms();
+}
+inline void AcquireRequest::_internal_set_timestamp_unix_ms(int64_t value) {
+  
+  _impl_.timestamp_unix_ms_ = value;
+}
+inline void AcquireRequest::set_timestamp_unix_ms(int64_t value) {
+  _internal_set_timestamp_unix_ms(value);
+  // @@protoc_insertion_point(field_set:dscc.AcquireRequest.timestamp_unix_ms)
 }
 
 // -------------------------------------------------------------------
@@ -1316,54 +1479,54 @@ inline void AcquireResponse::set_allocated_message(std::string* message) {
 
 // ReleaseRequest
 
-// string tx_id = 1;
-inline void ReleaseRequest::clear_tx_id() {
-  _impl_.tx_id_.ClearToEmpty();
+// string agent_id = 1;
+inline void ReleaseRequest::clear_agent_id() {
+  _impl_.agent_id_.ClearToEmpty();
 }
-inline const std::string& ReleaseRequest::tx_id() const {
-  // @@protoc_insertion_point(field_get:dscc.ReleaseRequest.tx_id)
-  return _internal_tx_id();
+inline const std::string& ReleaseRequest::agent_id() const {
+  // @@protoc_insertion_point(field_get:dscc.ReleaseRequest.agent_id)
+  return _internal_agent_id();
 }
 template <typename ArgT0, typename... ArgT>
 inline PROTOBUF_ALWAYS_INLINE
-void ReleaseRequest::set_tx_id(ArgT0&& arg0, ArgT... args) {
+void ReleaseRequest::set_agent_id(ArgT0&& arg0, ArgT... args) {
  
- _impl_.tx_id_.Set(static_cast<ArgT0 &&>(arg0), args..., GetArenaForAllocation());
-  // @@protoc_insertion_point(field_set:dscc.ReleaseRequest.tx_id)
+ _impl_.agent_id_.Set(static_cast<ArgT0 &&>(arg0), args..., GetArenaForAllocation());
+  // @@protoc_insertion_point(field_set:dscc.ReleaseRequest.agent_id)
 }
-inline std::string* ReleaseRequest::mutable_tx_id() {
-  std::string* _s = _internal_mutable_tx_id();
-  // @@protoc_insertion_point(field_mutable:dscc.ReleaseRequest.tx_id)
+inline std::string* ReleaseRequest::mutable_agent_id() {
+  std::string* _s = _internal_mutable_agent_id();
+  // @@protoc_insertion_point(field_mutable:dscc.ReleaseRequest.agent_id)
   return _s;
 }
-inline const std::string& ReleaseRequest::_internal_tx_id() const {
-  return _impl_.tx_id_.Get();
+inline const std::string& ReleaseRequest::_internal_agent_id() const {
+  return _impl_.agent_id_.Get();
 }
-inline void ReleaseRequest::_internal_set_tx_id(const std::string& value) {
+inline void ReleaseRequest::_internal_set_agent_id(const std::string& value) {
   
-  _impl_.tx_id_.Set(value, GetArenaForAllocation());
+  _impl_.agent_id_.Set(value, GetArenaForAllocation());
 }
-inline std::string* ReleaseRequest::_internal_mutable_tx_id() {
+inline std::string* ReleaseRequest::_internal_mutable_agent_id() {
   
-  return _impl_.tx_id_.Mutable(GetArenaForAllocation());
+  return _impl_.agent_id_.Mutable(GetArenaForAllocation());
 }
-inline std::string* ReleaseRequest::release_tx_id() {
-  // @@protoc_insertion_point(field_release:dscc.ReleaseRequest.tx_id)
-  return _impl_.tx_id_.Release();
+inline std::string* ReleaseRequest::release_agent_id() {
+  // @@protoc_insertion_point(field_release:dscc.ReleaseRequest.agent_id)
+  return _impl_.agent_id_.Release();
 }
-inline void ReleaseRequest::set_allocated_tx_id(std::string* tx_id) {
-  if (tx_id != nullptr) {
+inline void ReleaseRequest::set_allocated_agent_id(std::string* agent_id) {
+  if (agent_id != nullptr) {
     
   } else {
     
   }
-  _impl_.tx_id_.SetAllocated(tx_id, GetArenaForAllocation());
+  _impl_.agent_id_.SetAllocated(agent_id, GetArenaForAllocation());
 #ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
-  if (_impl_.tx_id_.IsDefault()) {
-    _impl_.tx_id_.Set("", GetArenaForAllocation());
+  if (_impl_.agent_id_.IsDefault()) {
+    _impl_.agent_id_.Set("", GetArenaForAllocation());
   }
 #endif // PROTOBUF_FORCE_COPY_DEFAULT_STRING
-  // @@protoc_insertion_point(field_set_allocated:dscc.ReleaseRequest.tx_id)
+  // @@protoc_insertion_point(field_set_allocated:dscc.ReleaseRequest.agent_id)
 }
 
 // -------------------------------------------------------------------
