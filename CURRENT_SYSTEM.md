@@ -1,5 +1,10 @@
 # DSCC — Distributed Semantic Conflict Controller
 
+> Historical note:
+> this document reflects an earlier architecture snapshot and is no longer the
+> authoritative description of the repository. For the current distributed
+> runtime, benchmark flow, and repo layout, use `STATE.md`.
+
 ## Context for AI Models
 
 This document is a deep, self-contained description of the DSCC project: its purpose, architecture, every source file, data flows, concurrency model, infrastructure, build system, and known limitations. Use this document to fully understand the system before making changes.

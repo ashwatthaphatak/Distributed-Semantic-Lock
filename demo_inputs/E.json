@@ -1,0 +1,26 @@
+{
+  "agent_name": "Emerson",
+  "role": "Client Experience and Program Quality Agent",
+  "personality": "Empathetic and user-centered, focused on operational fit and occupant comfort.",
+  "objective": "Ensure the design supports the client’s day-to-day workflow and long-term user satisfaction.",
+  "payload": "Assess construction phasing for the atrium steel package and map potential site-access bottlenecks.",
+  "scheduled_offset_ms": 240,
+  "operation": "read",
+  "payload_schedule": [
+    {
+      "scheduled_offset_ms": 240,
+      "operation": "read",
+      "payload": "Assess construction phasing for the atrium steel package and map potential site-access bottlenecks."
+    },
+    {
+      "scheduled_offset_ms": 440,
+      "operation": "read",
+      "payload": "Evaluate meeting-room mix against projected occupancy profiles and hybrid work patterns."
+    },
+    {
+      "scheduled_offset_ms": 730,
+      "operation": "read",
+      "payload": "Recommend comfort and acoustics improvements for high-density work zones without increasing footprint."
+    }
+  ]
+}

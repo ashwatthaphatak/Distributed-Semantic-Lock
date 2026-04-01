@@ -21,11 +21,18 @@ message PingResponse {
 }
 
 message AcquireRequest {
+  enum OperationType {
+    OPERATION_TYPE_UNSPECIFIED = 0;
+    OPERATION_TYPE_WRITE = 1;
+    OPERATION_TYPE_READ = 2;
+  }
+
   string agent_id = 1;
   repeated float embedding = 2;
   string payload_text = 3;
   string source_file = 4;
   int64 timestamp_unix_ms = 5;
+  OperationType operation_type = 6;
 }
 
 message AcquireResponse {
@@ -38,6 +45,12 @@ message AcquireResponse {
   int64 lock_wait_ms = 7;
   float blocking_similarity_score = 8;
   string blocking_agent_id = 9;
+  string leader_redirect = 10;
+  string serving_node_id = 11;
+  int32 wait_position = 12;
+  int32 wake_count = 13;
+  int32 queue_hops = 14;
+  int32 active_lock_count = 15;
 }
 
 message ReleaseRequest {

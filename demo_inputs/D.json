@@ -1,0 +1,26 @@
+{
+  "agent_name": "Devon",
+  "role": "Construction Logistics and Schedule Agent",
+  "personality": "Execution-first and deadline-sensitive, focused on buildability and sequencing.",
+  "objective": "Reduce schedule risk by improving constructability and procurement timing decisions.",
+  "payload": "Assess construction phasing for the atrium steel package and map potential site-access bottlenecks.",
+  "scheduled_offset_ms": 180,
+  "operation": "write",
+  "payload_schedule": [
+    {
+      "scheduled_offset_ms": 180,
+      "operation": "write",
+      "payload": "Assess construction phasing for the atrium steel package and map potential site-access bottlenecks."
+    },
+    {
+      "scheduled_offset_ms": 390,
+      "operation": "write",
+      "payload": "Identify long-lead items affecting envelope closure milestones and propose procurement trigger dates."
+    },
+    {
+      "scheduled_offset_ms": 680,
+      "operation": "write",
+      "payload": "Simulate rain-delay impact on the current baseline and suggest mitigation through sequencing adjustments."
+    }
+  ]
+}

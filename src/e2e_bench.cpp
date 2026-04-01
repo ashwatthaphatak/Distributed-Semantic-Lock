@@ -3,6 +3,7 @@
 // It coordinates Docker startup, scenario execution, validation, and readable output.
 
 #include "dscc.grpc.pb.h"
+#include "dscc_raft.grpc.pb.h"
 #include "threadsafe_log.h"
 
 #include <grpcpp/grpcpp.h>
@@ -16,9 +17,11 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <exception>
 #include <iomanip>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <netdb.h>
 #include <sstream>
 #include <stdexcept>
@@ -56,7 +59,17 @@ struct Config {
     std::string embedding_port = "7997";
     std::string qdrant_host = "127.0.0.1";
     std::string qdrant_port = "6333";
-    std::string dscc_target = "127.0.0.1:50051";
+    std::string dscc_target = "127.0.0.1:50050";
+    std::vector<std::string> node_targets = {
+        "127.0.0.1:50051",
+        "127.0.0.1:50052",
+        "127.0.0.1:50053",
+    };
+    std::vector<std::string> node_service_names = {
+        "dscc-node-1",
+        "dscc-node-2",
+        "dscc-node-3",
+    };
     float theta = 0.78f;
     int lock_hold_ms = 750;
     bool teardown_on_exit = false;
@@ -77,6 +90,12 @@ struct AgentDocument {
     std::string source_file;
     std::string text;
     std::vector<float> embedding;
+    int64_t scheduled_offset_ms = 0;
+    enum class OperationType {
+        kWrite,
+        kRead,
+    };
+    OperationType operation = OperationType::kWrite;
 };
 
 struct AgentOutcome {
@@ -85,6 +104,7 @@ struct AgentOutcome {
     std::string display_name;
     grpc::Status status;
     dscc::AcquireResponse response;
+    AgentDocument::OperationType operation = AgentDocument::OperationType::kWrite;
     std::vector<float> embedding;
     int64_t submit_ms = 0;
     int64_t embedding_start_ms = 0;
@@ -109,10 +129,59 @@ struct TimelineEvent {
     std::string text;
 };
 
+struct LeaderObservation {
+    std::string node_target;
+    std::string service_name;
+    std::string leader_address;
+    std::string leader_id;
+    int64_t current_term = 0;
+};
+
 void log_tagged(const char* color,
                 const std::string& tag,
                 const std::string& message) {
     log_line(std::string(color) + "[" + tag + "]" + ansi::kReset + " " + message);
+}
+
+std::string trim_copy(const std::string& input) {
+    size_t begin = 0;
+    while (begin < input.size() &&
+           std::isspace(static_cast<unsigned char>(input[begin])) != 0) {
+        ++begin;
+    }
+
+    size_t end = input.size();
+    while (end > begin &&
+           std::isspace(static_cast<unsigned char>(input[end - 1])) != 0) {
+        --end;
+    }
+    return input.substr(begin, end - begin);
+}
+
+std::string lowercase_copy(std::string text);
+
+std::string operation_type_name(AgentDocument::OperationType operation) {
+    return operation == AgentDocument::OperationType::kRead ? "read" : "write";
+}
+
+dscc::AcquireRequest::OperationType operation_type_to_proto(
+    AgentDocument::OperationType operation) {
+    return operation == AgentDocument::OperationType::kRead
+               ? dscc::AcquireRequest::OPERATION_TYPE_READ
+               : dscc::AcquireRequest::OPERATION_TYPE_WRITE;
+}
+
+AgentDocument::OperationType parse_operation_type(const std::string& raw_operation,
+                                                  const std::string& source_file) {
+    const std::string normalized = lowercase_copy(trim_copy(raw_operation));
+    if (normalized.empty() || normalized == "write") {
+        return AgentDocument::OperationType::kWrite;
+    }
+    if (normalized == "read") {
+        return AgentDocument::OperationType::kRead;
+    }
+    throw std::runtime_error("invalid operation '" + raw_operation + "' in " + source_file +
+                             "; expected 'write' or 'read'");
 }
 
 void info(const std::string& message) {
@@ -419,6 +488,210 @@ std::string read_text_file(const fs::path& path) {
     return text;
 }
 
+std::string parse_json_string_field(const std::string& body,
+                                    const std::string& key) {
+    const std::string quoted_key = "\"" + key + "\"";
+    const size_t key_pos = body.find(quoted_key);
+    if (key_pos == std::string::npos) {
+        throw std::runtime_error("missing JSON string field: " + key);
+    }
+
+    const size_t colon = body.find(':', key_pos + quoted_key.size());
+    if (colon == std::string::npos) {
+        throw std::runtime_error("malformed JSON field: " + key);
+    }
+
+    size_t value_start = body.find('"', colon + 1);
+    if (value_start == std::string::npos) {
+        throw std::runtime_error("missing opening quote for JSON field: " + key);
+    }
+    ++value_start;
+
+    std::string value;
+    bool escaping = false;
+    for (size_t i = value_start; i < body.size(); ++i) {
+        const char ch = body[i];
+        if (escaping) {
+            switch (ch) {
+                case '"':
+                case '\\':
+                case '/':
+                    value.push_back(ch);
+                    break;
+                case 'b':
+                    value.push_back('\b');
+                    break;
+                case 'f':
+                    value.push_back('\f');
+                    break;
+                case 'n':
+                    value.push_back('\n');
+                    break;
+                case 'r':
+                    value.push_back('\r');
+                    break;
+                case 't':
+                    value.push_back('\t');
+                    break;
+                default:
+                    value.push_back(ch);
+                    break;
+            }
+            escaping = false;
+            continue;
+        }
+        if (ch == '\\') {
+            escaping = true;
+            continue;
+        }
+        if (ch == '"') {
+            return value;
+        }
+        value.push_back(ch);
+    }
+
+    throw std::runtime_error("unterminated JSON string field: " + key);
+}
+
+std::string parse_json_string_field_or_default(const std::string& body,
+                                               const std::string& key,
+                                               const std::string& default_value) {
+    const std::string quoted_key = "\"" + key + "\"";
+    if (body.find(quoted_key) == std::string::npos) {
+        return default_value;
+    }
+    return parse_json_string_field(body, key);
+}
+
+int64_t parse_json_int_field(const std::string& body,
+                             const std::string& key,
+                             int64_t default_value) {
+    const std::string quoted_key = "\"" + key + "\"";
+    const size_t key_pos = body.find(quoted_key);
+    if (key_pos == std::string::npos) {
+        return default_value;
+    }
+
+    const size_t colon = body.find(':', key_pos + quoted_key.size());
+    if (colon == std::string::npos) {
+        throw std::runtime_error("malformed JSON integer field: " + key);
+    }
+
+    size_t value_start = colon + 1;
+    while (value_start < body.size() &&
+           std::isspace(static_cast<unsigned char>(body[value_start])) != 0) {
+        ++value_start;
+    }
+
+    size_t value_end = value_start;
+    if (value_end < body.size() &&
+        (body[value_end] == '-' || body[value_end] == '+')) {
+        ++value_end;
+    }
+    while (value_end < body.size() &&
+           std::isdigit(static_cast<unsigned char>(body[value_end])) != 0) {
+        ++value_end;
+    }
+
+    if (value_end == value_start) {
+        throw std::runtime_error("missing JSON integer value for field: " + key);
+    }
+
+    return std::stoll(body.substr(value_start, value_end - value_start));
+}
+
+std::optional<std::string> parse_first_payload_schedule_entry(const std::string& body) {
+    const std::string quoted_key = "\"payload_schedule\"";
+    const size_t key_pos = body.find(quoted_key);
+    if (key_pos == std::string::npos) {
+        return std::nullopt;
+    }
+
+    const size_t array_start = body.find('[', key_pos + quoted_key.size());
+    if (array_start == std::string::npos) {
+        throw std::runtime_error("malformed payload_schedule array");
+    }
+
+    bool in_string = false;
+    bool escaping = false;
+    int object_depth = 0;
+    size_t object_start = std::string::npos;
+
+    for (size_t i = array_start + 1; i < body.size(); ++i) {
+        const char ch = body[i];
+        if (escaping) {
+            escaping = false;
+            continue;
+        }
+        if (ch == '\\') {
+            escaping = true;
+            continue;
+        }
+        if (ch == '"') {
+            in_string = !in_string;
+            continue;
+        }
+        if (in_string) {
+            continue;
+        }
+        if (ch == '{') {
+            if (object_depth == 0) {
+                object_start = i;
+            }
+            ++object_depth;
+            continue;
+        }
+        if (ch == '}') {
+            if (object_depth > 0) {
+                --object_depth;
+                if (object_depth == 0 && object_start != std::string::npos) {
+                    return body.substr(object_start, i - object_start + 1);
+                }
+            }
+            continue;
+        }
+        if (ch == ']' && object_depth == 0) {
+            break;
+        }
+    }
+
+    return std::nullopt;
+}
+
+AgentDocument load_agent_document(const Config& config, char label) {
+    const fs::path json_path = fs::path(config.input_dir) / (std::string(1, label) + ".json");
+
+    AgentDocument doc;
+    doc.label = label;
+
+    if (!fs::exists(json_path)) {
+        throw std::runtime_error("missing demo input " + json_path.string());
+    }
+
+    const std::string json = read_text_file(json_path);
+    doc.source_file = json_path.filename().string();
+
+    // Keep the e2e harness aligned with the benchmark runner: both consume the
+    // first scheduled operation when a stream-style payload schedule is present.
+    if (const std::optional<std::string> schedule_entry =
+            parse_first_payload_schedule_entry(json);
+        schedule_entry.has_value()) {
+        doc.text = parse_json_string_field(*schedule_entry, "payload");
+        doc.scheduled_offset_ms =
+            parse_json_int_field(*schedule_entry, "scheduled_offset_ms", 0);
+        doc.operation = parse_operation_type(
+            parse_json_string_field_or_default(*schedule_entry, "operation", "write"),
+            doc.source_file);
+    } else {
+        doc.text = parse_json_string_field(json, "payload");
+        doc.scheduled_offset_ms = parse_json_int_field(json, "scheduled_offset_ms", 0);
+        doc.operation = parse_operation_type(
+            parse_json_string_field_or_default(json, "operation", "write"),
+            doc.source_file);
+    }
+    return doc;
+}
+
 float cosine_similarity(const std::vector<float>& a,
                         const std::vector<float>& b) {
     if (a.empty() || b.empty() || a.size() != b.size()) {
@@ -502,6 +775,125 @@ ShellCommandResult run_compose_capture(const Config& config,
     return run_shell_capture(command);
 }
 
+void run_compose_or_throw(const Config& config,
+                          const std::string& compose_args,
+                          const std::string& failure_message) {
+    const std::string command =
+        "cd " + shell_quote(config.project_root) + " && docker compose " + compose_args;
+    if (run_shell_command(command) != 0) {
+        throw std::runtime_error(failure_message + " (" + compose_args + ")");
+    }
+}
+
+std::string service_name_for_target(const Config& config, const std::string& target) {
+    for (size_t i = 0; i < config.node_targets.size(); ++i) {
+        const std::string advertised_target = config.node_service_names[i] + ":50051";
+        if (config.node_targets[i] == target ||
+            advertised_target == target ||
+            config.node_service_names[i] == target) {
+            return config.node_service_names[i];
+        }
+    }
+    return "";
+}
+
+std::string service_name_for_node_id(const Config& config, const std::string& node_id) {
+    if (node_id.rfind("node-", 0) != 0) {
+        return "";
+    }
+    return "dscc-" + node_id;
+}
+
+std::string host_target_for_service_name(const Config& config,
+                                         const std::string& service_name) {
+    for (size_t i = 0; i < config.node_service_names.size(); ++i) {
+        if (config.node_service_names[i] == service_name) {
+            return config.node_targets[i];
+        }
+    }
+    return "";
+}
+
+std::string host_target_for_target(const Config& config, const std::string& target) {
+    const std::string service_name = service_name_for_target(config, target);
+    if (service_name.empty()) {
+        return "";
+    }
+    return host_target_for_service_name(config, service_name);
+}
+
+std::optional<LeaderObservation> discover_leader(const Config& config) {
+    for (size_t i = 0; i < config.node_targets.size(); ++i) {
+        auto channel =
+            grpc::CreateChannel(config.node_targets[i], grpc::InsecureChannelCredentials());
+        auto stub = dscc_raft::RaftService::NewStub(channel);
+
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+        dscc_raft::LeaderQuery request;
+        dscc_raft::LeaderInfo response;
+        const grpc::Status status = stub->GetLeader(&context, request, &response);
+        if (!status.ok()) {
+            continue;
+        }
+
+        if (response.is_leader() || !response.leader_address().empty()) {
+            LeaderObservation observation;
+            observation.node_target = config.node_targets[i];
+            observation.leader_address = response.leader_address();
+            observation.leader_id = response.leader_id();
+            observation.current_term = response.current_term();
+            observation.service_name =
+                !response.leader_id().empty()
+                    ? service_name_for_node_id(config, response.leader_id())
+                    : service_name_for_target(config,
+                                              response.leader_address().empty()
+                                                  ? config.node_targets[i]
+                                                  : response.leader_address());
+            return observation;
+        }
+    }
+
+    return std::nullopt;
+}
+
+LeaderObservation wait_for_leader(const Config& config,
+                                  std::chrono::milliseconds timeout,
+                                  const std::string& expected_different_from = {}) {
+    const auto deadline = SteadyClock::now() + timeout;
+    while (SteadyClock::now() < deadline) {
+        const std::optional<LeaderObservation> observation = discover_leader(config);
+        if (observation.has_value() &&
+            !observation->leader_address.empty() &&
+            (expected_different_from.empty() ||
+             observation->leader_address != expected_different_from)) {
+            return *observation;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    throw std::runtime_error("timed out waiting for a cluster leader");
+}
+
+void wait_for_node_control_plane(const std::string& target,
+                                 std::chrono::milliseconds timeout) {
+    const auto deadline = SteadyClock::now() + timeout;
+    while (SteadyClock::now() < deadline) {
+        auto channel = grpc::CreateChannel(target, grpc::InsecureChannelCredentials());
+        auto stub = dscc_raft::RaftService::NewStub(channel);
+
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+        dscc_raft::LeaderQuery request;
+        dscc_raft::LeaderInfo response;
+        const grpc::Status status = stub->GetLeader(&context, request, &response);
+        if (status.ok()) {
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    throw std::runtime_error("timed out waiting for node control plane at " + target);
+}
+
 bool embedding_service_failed(const Config& config,
                               std::string& status_output,
                               std::string& logs_output) {
@@ -540,7 +932,8 @@ void start_compose_stack(const Config& config) {
 
     const std::string command =
         "cd " + shell_quote(config.project_root) +
-        " && docker compose up -d --build qdrant embedding-service dscc-node";
+        " && docker compose up -d --build qdrant embedding-service "
+        "dscc-node-1 dscc-node-2 dscc-node-3 dscc-proxy";
     if (run_shell_command(command) != 0) {
         throw std::runtime_error("docker compose up failed");
     }
@@ -709,14 +1102,13 @@ std::vector<AgentDocument> load_agent_documents(const Config& config) {
     documents.reserve(labels.size());
 
     for (char label : labels) {
-        AgentDocument doc;
-        doc.label = label;
-        doc.source_file = std::string(1, label) + ".txt";
-        doc.text = read_text_file(fs::path(config.input_dir) / doc.source_file);
+        AgentDocument doc = load_agent_document(config, label);
         info("Embedding " + doc.source_file + " via embedding service...");
         doc.embedding = request_embedding(config, doc.text);
         info(doc.source_file + " embedding dimension = " +
-             std::to_string(doc.embedding.size()));
+             std::to_string(doc.embedding.size()) +
+             ", scheduled_offset_ms = " + std::to_string(doc.scheduled_offset_ms) +
+             ", operation = " + operation_type_name(doc.operation));
         documents.push_back(std::move(doc));
     }
 
@@ -805,6 +1197,10 @@ bool validate_qdrant_payloads(const std::string& scroll_body,
                               const std::vector<AgentOutcome>& outcomes,
                               const std::map<char, AgentDocument>& docs) {
     for (const auto& outcome : outcomes) {
+        if (outcome.operation != AgentDocument::OperationType::kWrite) {
+            continue;
+        }
+
         if (scroll_body.find(outcome.agent_id) == std::string::npos) {
             error("Qdrant payload check failed: missing agent_id " + outcome.agent_id);
             return false;
@@ -867,7 +1263,8 @@ void print_timeline(const std::vector<AgentOutcome>& outcomes,
     for (const auto& outcome : outcomes) {
         push_event(outcome.submit_ms,
                    ansi::kBlue,
-                   outcome.display_name + " submitted text");
+                   outcome.display_name + " submitted " +
+                       operation_type_name(outcome.operation) + " payload");
         push_event(outcome.embedding_start_ms,
                    ansi::kCyan,
                    outcome.display_name + " entered embedding model");
@@ -883,7 +1280,8 @@ void print_timeline(const std::vector<AgentOutcome>& outcomes,
 
         std::ostringstream acquired;
         acquired << outcome.display_name
-                 << " acquired semantic lock";
+                 << " acquired semantic lock for "
+                 << operation_type_name(outcome.operation);
         if (outcome.response.lock_wait_ms() > 0) {
             acquired << " after waiting " << outcome.response.lock_wait_ms() << "ms";
             if (!outcome.response.blocking_agent_id().empty()) {
@@ -899,7 +1297,8 @@ void print_timeline(const std::vector<AgentOutcome>& outcomes,
                    acquired.str());
 
         std::ostringstream written;
-        written << outcome.display_name << " finished Qdrant write";
+        written << outcome.display_name
+                << " finished Qdrant " << operation_type_name(outcome.operation);
         push_event(relative_unix_ms(outcome.response.qdrant_write_complete_unix_ms(),
                                     unix_base_ms),
                    ansi::kGreen,
@@ -950,7 +1349,7 @@ void print_agent_recaps(const std::vector<AgentOutcome>& outcomes,
         log_line(line2.str());
 
         std::ostringstream line3;
-        line3 << "    write complete: "
+        line3 << "    " << operation_type_name(outcome.operation) << " complete: "
               << format_optional_ms(relative_unix_ms(
                      outcome.response.qdrant_write_complete_unix_ms(), unix_base_ms));
         log_line(line3.str());
@@ -958,6 +1357,7 @@ void print_agent_recaps(const std::vector<AgentOutcome>& outcomes,
         std::ostringstream line4;
         line4 << "    result: "
               << (outcome.response.granted() ? "granted" : "failed")
+              << " (" << operation_type_name(outcome.operation) << ")"
               << " in " << outcome.elapsed_ms << "ms";
         log_line(line4.str());
 
@@ -965,13 +1365,64 @@ void print_agent_recaps(const std::vector<AgentOutcome>& outcomes,
     }
 }
 
+void print_scenario_stats(const std::vector<AgentOutcome>& outcomes) {
+    if (outcomes.empty()) {
+        return;
+    }
+
+    int64_t total_wait_ms = 0;
+    int64_t total_embedding_ms = 0;
+    int64_t total_rpc_ms = 0;
+    int64_t total_qdrant_ms = 0;
+    int64_t max_wait_ms = 0;
+    int waited_agents = 0;
+
+    for (const auto& outcome : outcomes) {
+        const int64_t embedding_ms =
+            outcome.embedding_finish_ms - outcome.embedding_start_ms;
+        const int64_t rpc_ms = outcome.dslm_exit_ms - outcome.dslm_enter_ms;
+        const int64_t qdrant_ms =
+            outcome.response.qdrant_write_complete_unix_ms() > 0 &&
+                    outcome.response.lock_acquired_unix_ms() > 0
+                ? outcome.response.qdrant_write_complete_unix_ms() -
+                      outcome.response.lock_acquired_unix_ms()
+                : 0;
+
+        total_wait_ms += outcome.response.lock_wait_ms();
+        total_embedding_ms += embedding_ms;
+        total_rpc_ms += rpc_ms;
+        total_qdrant_ms += qdrant_ms;
+        max_wait_ms = std::max<int64_t>(max_wait_ms, outcome.response.lock_wait_ms());
+        if (!outcome.response.blocking_agent_id().empty()) {
+            ++waited_agents;
+        }
+    }
+
+    const double agent_count = static_cast<double>(outcomes.size());
+    log_line("Scenario Stats:");
+    log_line("  agents: " + std::to_string(outcomes.size()));
+    log_line("  waited agents: " + std::to_string(waited_agents));
+    log_line("  avg lock wait: " +
+             std::to_string(static_cast<int64_t>(total_wait_ms / agent_count)) + "ms");
+    log_line("  max lock wait: " + std::to_string(max_wait_ms) + "ms");
+    log_line("  avg embedding latency: " +
+             std::to_string(static_cast<int64_t>(total_embedding_ms / agent_count)) + "ms");
+    log_line("  avg DSLM RPC latency: " +
+             std::to_string(static_cast<int64_t>(total_rpc_ms / agent_count)) + "ms");
+    log_line("  avg Qdrant operation window: " +
+             std::to_string(static_cast<int64_t>(total_qdrant_ms / agent_count)) + "ms");
+    log_line("");
+}
+
 bool validate_conflict_pairs(const Scenario& scenario,
                              const std::vector<AgentOutcome>& outcomes,
                              const std::map<char, AgentDocument>& docs,
                              const Config& config) {
     std::map<char, AgentOutcome> indexed;
+    std::map<std::string, AgentDocument::OperationType> operations_by_agent_id;
     for (const auto& outcome : outcomes) {
         indexed[outcome.label] = outcome;
+        operations_by_agent_id[outcome.agent_id] = outcome.operation;
     }
 
     for (const auto& [left, right] : scenario.expected_conflicts) {
@@ -995,18 +1446,50 @@ bool validate_conflict_pairs(const Scenario& scenario,
                   std::to_string(minimum_gap) + "ms");
             return false;
         }
+
+        const AgentDocument::OperationType left_operation = docs.at(left).operation;
+        const AgentDocument::OperationType right_operation = docs.at(right).operation;
+        const bool mixed_read_write =
+            left_operation != right_operation;
+        if (mixed_read_write) {
+            const char read_label = left_operation == AgentDocument::OperationType::kRead
+                                        ? left
+                                        : right;
+            const AgentOutcome& read_outcome = indexed.at(read_label);
+            if (read_outcome.response.lock_wait_ms() <= 0) {
+                error("Read operation " + std::string(1, read_label) +
+                      " should have waited on conflicting write but lock_wait_ms was " +
+                      std::to_string(read_outcome.response.lock_wait_ms()));
+                return false;
+            }
+            const std::string blocker = read_outcome.response.blocking_agent_id();
+            if (blocker.empty()) {
+                error("Read operation " + std::string(1, read_label) +
+                      " waited but blocking_agent_id was empty");
+                return false;
+            }
+            const auto blocker_it = operations_by_agent_id.find(blocker);
+            if (blocker_it == operations_by_agent_id.end() ||
+                blocker_it->second != AgentDocument::OperationType::kWrite) {
+                error("Read operation " + std::string(1, read_label) +
+                      " was blocked by non-write operation " + blocker);
+                return false;
+            }
+        }
     }
 
     return true;
 }
 
 bool validate_distinct_completion(const std::vector<AgentOutcome>& outcomes,
+                                  const std::vector<AgentDocument>& docs,
                                   const Config& config) {
-    int64_t earliest = outcomes.front().finish_ms;
-    int64_t latest = outcomes.front().finish_ms;
-    for (const auto& outcome : outcomes) {
-        earliest = std::min(earliest, outcome.finish_ms);
-        latest = std::max(latest, outcome.finish_ms);
+    int64_t earliest = outcomes.front().finish_ms - docs.front().scheduled_offset_ms;
+    int64_t latest = earliest;
+    for (size_t i = 0; i < outcomes.size(); ++i) {
+        const int64_t normalized_finish = outcomes[i].finish_ms - docs[i].scheduled_offset_ms;
+        earliest = std::min(earliest, normalized_finish);
+        latest = std::max(latest, normalized_finish);
     }
 
     const int64_t spread = latest - earliest;
@@ -1038,7 +1521,8 @@ bool scenario_has_threshold_conflict(const Scenario& scenario,
 
 bool run_scenario(const Config& config,
                   const Scenario& scenario,
-                  const std::map<char, AgentDocument>& docs) {
+                  const std::map<char, AgentDocument>& docs,
+                  std::function<void()> mid_run_action = {}) {
     section_header(scenario.name);
     info("Preparing fresh Qdrant collection.");
     reset_qdrant_collection(config);
@@ -1075,11 +1559,15 @@ bool run_scenario(const Config& config,
             auto stub = dscc::LockService::NewStub(channel);
             const auto& doc = selected_docs[i];
             outcomes[i].label = doc.label;
+            outcomes[i].operation = doc.operation;
             outcomes[i].display_name = agent_name(doc.label);
             outcomes[i].agent_id = "scenario-" + scenario_slug(scenario.name) +
                                    "-agent-" + doc.label;
 
             sync_point.arrive_and_wait();
+
+            std::this_thread::sleep_until(
+                scenario_start + std::chrono::milliseconds(doc.scheduled_offset_ms));
 
             outcomes[i].submit_ms = now_ms();
             outcomes[i].embedding_start_ms = now_ms();
@@ -1090,7 +1578,8 @@ bool run_scenario(const Config& config,
             request.set_agent_id(outcomes[i].agent_id);
             request.set_payload_text(doc.text);
             request.set_source_file(doc.source_file);
-            request.set_timestamp_unix_ms(unix_base_ms + static_cast<int64_t>(i));
+            request.set_timestamp_unix_ms(unix_base_ms + doc.scheduled_offset_ms);
+            request.set_operation_type(operation_type_to_proto(doc.operation));
             for (float value : outcomes[i].embedding) {
                 request.add_embedding(value);
             }
@@ -1104,12 +1593,31 @@ bool run_scenario(const Config& config,
         });
     }
 
+    std::thread mid_run_thread;
+    std::exception_ptr mid_run_error;
+    if (mid_run_action) {
+        mid_run_thread = std::thread([&]() {
+            try {
+                mid_run_action();
+            } catch (...) {
+                mid_run_error = std::current_exception();
+            }
+        });
+    }
+
     for (auto& thread : threads) {
         thread.join();
+    }
+    if (mid_run_thread.joinable()) {
+        mid_run_thread.join();
+    }
+    if (mid_run_error != nullptr) {
+        std::rethrow_exception(mid_run_error);
     }
 
     print_timeline(outcomes, unix_base_ms, config.theta);
     print_agent_recaps(outcomes, unix_base_ms);
+    print_scenario_stats(outcomes);
 
     for (const auto& outcome : outcomes) {
         if (!outcome.status.ok()) {
@@ -1123,9 +1631,15 @@ bool run_scenario(const Config& config,
         }
     }
 
+    const int expected_write_count = static_cast<int>(
+        std::count_if(selected_docs.begin(),
+                      selected_docs.end(),
+                      [](const AgentDocument& doc) {
+                          return doc.operation == AgentDocument::OperationType::kWrite;
+                      }));
     const int count = qdrant_point_count(config);
-    if (count != static_cast<int>(selected_docs.size())) {
-        error("Qdrant count mismatch; expected " + std::to_string(selected_docs.size()) +
+    if (count != expected_write_count) {
+        error("Qdrant count mismatch; expected " + std::to_string(expected_write_count) +
               " points, got " + std::to_string(count));
         return false;
     }
@@ -1142,7 +1656,7 @@ bool run_scenario(const Config& config,
     }
     if (scenario.expect_distinct_completion) {
         if (!scenario_has_threshold_conflict(scenario, docs, config)) {
-            if (!validate_distinct_completion(outcomes, config)) {
+            if (!validate_distinct_completion(outcomes, selected_docs, config)) {
                 return false;
             }
         } else {
@@ -1154,6 +1668,128 @@ bool run_scenario(const Config& config,
     return true;
 }
 
+bool run_leader_failover_scenario(const Config& config,
+                                  const std::map<char, AgentDocument>& docs) {
+    const Scenario scenario{
+        "Scenario Five: Kill the current leader during full fan-in",
+        {'A', 'B', 'C', 'D', 'E'},
+        {{'A', 'B'}, {'D', 'E'}},
+        false,
+    };
+
+    const LeaderObservation leader_before =
+        wait_for_leader(config, std::chrono::seconds(8));
+    info("Current leader before failover scenario: " + leader_before.service_name +
+         " at " + leader_before.leader_address +
+         " term=" + std::to_string(leader_before.current_term));
+
+    const bool pass = run_scenario(
+        config,
+        scenario,
+        docs,
+        [&]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            info("Stopping leader " + leader_before.service_name + " mid-scenario");
+            run_compose_or_throw(config,
+                                 "stop " + leader_before.service_name,
+                                 "failed to stop leader");
+            const LeaderObservation new_leader =
+                wait_for_leader(config,
+                                std::chrono::seconds(12),
+                                leader_before.leader_address);
+            success("New leader elected: " + new_leader.service_name +
+                    " at " + new_leader.leader_address +
+                    " term=" + std::to_string(new_leader.current_term));
+        });
+
+    info("Restarting previous leader " + leader_before.service_name);
+    run_compose_or_throw(config,
+                         "start " + leader_before.service_name,
+                         "failed to restart leader");
+    const std::string restarted_target =
+        host_target_for_service_name(config, leader_before.service_name);
+    if (restarted_target.empty()) {
+        throw std::runtime_error("could not map restarted leader to a host target");
+    }
+    wait_for_node_control_plane(restarted_target, std::chrono::seconds(12));
+    wait_for_leader(config, std::chrono::seconds(8));
+    return pass;
+}
+
+bool run_follower_restart_scenario(const Config& config,
+                                   const std::map<char, AgentDocument>& docs) {
+    const LeaderObservation leader_before =
+        wait_for_leader(config, std::chrono::seconds(8));
+
+    std::string restarting_target;
+    std::string restarting_service;
+    std::string healthy_follower_target;
+    std::string healthy_follower_service;
+    const std::string leader_service =
+        !leader_before.service_name.empty()
+            ? leader_before.service_name
+            : service_name_for_target(config, leader_before.leader_address);
+    for (size_t i = 0; i < config.node_targets.size(); ++i) {
+        if (config.node_service_names[i] == leader_service) {
+            continue;
+        }
+        if (restarting_target.empty()) {
+            restarting_target = config.node_targets[i];
+            restarting_service = config.node_service_names[i];
+        } else {
+            healthy_follower_target = config.node_targets[i];
+            healthy_follower_service = config.node_service_names[i];
+        }
+    }
+
+    if (restarting_service.empty() || healthy_follower_service.empty()) {
+        throw std::runtime_error("could not identify follower services for restart scenario");
+    }
+
+    info("Stopping follower " + restarting_service + " before quorum test");
+    run_compose_or_throw(config,
+                         "stop " + restarting_service,
+                         "failed to stop follower");
+
+    const Scenario quorum_two_scenario{
+        "Scenario Six: Operate with one follower down",
+        {'A', 'B', 'D', 'E'},
+        {{'A', 'B'}, {'D', 'E'}},
+        false,
+    };
+    bool overall_pass = run_scenario(config, quorum_two_scenario, docs);
+
+    info("Restarting follower " + restarting_service);
+    run_compose_or_throw(config,
+                         "start " + restarting_service,
+                         "failed to restart follower");
+    wait_for_node_control_plane(restarting_target, std::chrono::seconds(12));
+    wait_for_leader(config, std::chrono::seconds(8));
+
+    info("Stopping the other follower " + healthy_follower_service +
+         " to force quorum onto the restarted node");
+    run_compose_or_throw(config,
+                         "stop " + healthy_follower_service,
+                         "failed to stop healthy follower");
+
+    const Scenario restarted_quorum_scenario{
+        "Scenario Seven: Rejoined follower participates in quorum",
+        {'A', 'B'},
+        {{'A', 'B'}},
+        false,
+    };
+    overall_pass = run_scenario(config, restarted_quorum_scenario, docs) && overall_pass;
+
+    info("Restarting follower " + healthy_follower_service);
+    run_compose_or_throw(config,
+                         "start " + healthy_follower_service,
+                         "failed to restart healthy follower");
+    wait_for_node_control_plane(healthy_follower_target, std::chrono::seconds(12));
+    wait_for_leader(config, std::chrono::seconds(8));
+
+    return overall_pass;
+}
+
 void print_runtime_summary(const Config& config) {
     section_header("Runtime Configuration");
     info("Project root: " + config.project_root);
@@ -1163,6 +1799,7 @@ void print_runtime_summary(const Config& config) {
     info("DSCC theta: " + format_float(config.theta));
     info("DSCC lock hold: " + std::to_string(config.lock_hold_ms) + "ms");
     info("Qdrant collection: " + config.collection);
+    info("Proxy target: " + config.dscc_target);
 }
 
 }  // namespace
@@ -1184,16 +1821,24 @@ int main() {
         wait_for_embedding_service(config);
         ensure_ollama_model_available(config);
         wait_for_dscc_service(config);
+        {
+            const LeaderObservation leader =
+                wait_for_leader(config, std::chrono::seconds(12));
+            info("Cluster leader: " + leader.service_name +
+                 " at " + leader.leader_address +
+                 " term=" + std::to_string(leader.current_term));
+        }
 
         const std::vector<AgentDocument> documents = load_agent_documents(config);
         const std::map<char, AgentDocument> indexed_docs = index_documents(documents);
         print_similarity_matrix(indexed_docs);
 
         const std::vector<Scenario> scenarios = {
-            {"Scenario One: Agents A and B describe the same invoice", {'A', 'B'},
+            {"Scenario One: Write A conflicts with Read B on the same stream text", {'A', 'B'},
              {{'A', 'B'}}, false},
-            {"Scenario Two: Agents A, C, and D run together", {'A', 'C', 'D'}, {}, true},
-            {"Scenario Three: Agents D and E describe the same payroll task", {'D', 'E'},
+            {"Scenario Two: Mixed write/read stream without forced conflicts", {'A', 'C', 'D'},
+             {}, true},
+            {"Scenario Three: Write D conflicts with Read E on the same stream text", {'D', 'E'},
              {{'D', 'E'}}, false},
             {"Scenario Four: Full fan-in with Agents A through E", {'A', 'B', 'C', 'D', 'E'},
              {{'A', 'B'}, {'D', 'E'}}, false},
@@ -1204,6 +1849,8 @@ int main() {
             const bool pass = run_scenario(config, scenario, indexed_docs);
             overall_pass = overall_pass && pass;
         }
+        overall_pass = run_leader_failover_scenario(config, indexed_docs) && overall_pass;
+        overall_pass = run_follower_restart_scenario(config, indexed_docs) && overall_pass;
 
         section_header("End-to-End Summary");
         if (overall_pass) {
