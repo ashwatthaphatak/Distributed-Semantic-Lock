@@ -69,3 +69,6 @@ Thumbs.db
 .cache/
 ollama_data/
 logs/
+
+# Claude code 
+CLAUDE.md
