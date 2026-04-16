@@ -10,7 +10,6 @@
 
 #include <cerrno>
 #include <chrono>
-#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <cstdint>
@@ -42,40 +41,6 @@ private:
     std::function<void()> fn_;
     bool active_;
 };
-
-float read_theta_from_env() {
-    constexpr float kDefaultTheta = 0.85f;
-    const char* theta_env = std::getenv("THETA");
-    if (theta_env == nullptr) {
-        return kDefaultTheta;
-    }
-
-    char* endptr = nullptr;
-    const float parsed = std::strtof(theta_env, &endptr);
-    if (endptr == theta_env || parsed < 0.0f || parsed > 1.0f) {
-        return kDefaultTheta;
-    }
-    return parsed;
-}
-
-int read_lock_hold_ms_from_env() {
-    const char* hold_env = std::getenv("LOCK_HOLD_MS");
-    if (hold_env == nullptr) {
-        return 0;
-    }
-
-    char* endptr = nullptr;
-    const long parsed = std::strtol(hold_env, &endptr, 10);
-    if (endptr == hold_env || parsed < 0L || parsed > 600000L) {
-        return 0;
-    }
-    return static_cast<int>(parsed);
-}
-
-std::string getenv_or_default(const char* key, const char* fallback) {
-    const char* value = std::getenv(key);
-    return value != nullptr ? value : fallback;
-}
 
 int64_t make_numeric_point_id(const std::string& agent_id, int64_t timestamp_unix_ms) {
     constexpr uint64_t kFnvOffset = 1469598103934665603ULL;
@@ -141,26 +106,61 @@ bool send_all(int socket_fd, const std::string& payload) {
     return true;
 }
 
+dscc::AcquireRequest::OperationType normalize_operation_type(
+    dscc::AcquireRequest::OperationType operation_type) {
+    switch (operation_type) {
+        case dscc::AcquireRequest::OPERATION_TYPE_WRITE:
+        case dscc::AcquireRequest::OPERATION_TYPE_READ:
+            return operation_type;
+        case dscc::AcquireRequest::OPERATION_TYPE_UNSPECIFIED:
+        default:
+            return dscc::AcquireRequest::OPERATION_TYPE_WRITE;
+    }
+}
+
+const char* operation_type_label(dscc::AcquireRequest::OperationType operation_type) {
+    switch (operation_type) {
+        case dscc::AcquireRequest::OPERATION_TYPE_READ:
+            return "read";
+        case dscc::AcquireRequest::OPERATION_TYPE_WRITE:
+        case dscc::AcquireRequest::OPERATION_TYPE_UNSPECIFIED:
+        default:
+            return "write";
+    }
+}
+
 }  // namespace
 
-LockServiceImpl::LockServiceImpl()
-    : theta_(read_theta_from_env()),
-      lock_hold_ms_(read_lock_hold_ms_from_env()),
-      qdrant_host_(getenv_or_default("QDRANT_HOST", "qdrant")),
-      qdrant_port_(getenv_or_default("QDRANT_PORT", "6333")),
-      qdrant_collection_(getenv_or_default("QDRANT_COLLECTION", "dscc_memory")) {}
+LockServiceImpl::LockServiceImpl(RaftNode* raft,
+                                 ActiveLockTable* lock_table,
+                                 std::string node_id,
+                                 float theta,
+                                 int lock_hold_ms,
+                                 int raft_propose_timeout_ms,
+                                 std::string qdrant_host,
+                                 std::string qdrant_port,
+                                 std::string qdrant_collection)
+    : raft_(raft),
+      lock_table_(lock_table),
+      node_id_(std::move(node_id)),
+      theta_(theta),
+      lock_hold_ms_(lock_hold_ms),
+      raft_propose_timeout_ms_(raft_propose_timeout_ms),
+      qdrant_host_(std::move(qdrant_host)),
+      qdrant_port_(std::move(qdrant_port)),
+      qdrant_collection_(std::move(qdrant_collection)) {}
 
 grpc::Status LockServiceImpl::Ping(
     grpc::ServerContext*,
     const dscc::PingRequest* request,
     dscc::PingResponse* response) {
 
-    response->set_message("pong to " + request->from_node());
+    response->set_message("pong from " + node_id_ + " to " + request->from_node());
     return grpc::Status::OK;
 }
 
 grpc::Status LockServiceImpl::AcquireGuard(
-    grpc::ServerContext*,
+    grpc::ServerContext* context,
     const dscc::AcquireRequest* request,
     dscc::AcquireResponse* response) {
     const std::string agent_id = request->agent_id();
@@ -168,6 +168,8 @@ grpc::Status LockServiceImpl::AcquireGuard(
                                        request->embedding().end());
     const std::string payload_text = request->payload_text();
     const std::string source_file = request->source_file();
+    const dscc::AcquireRequest::OperationType operation_type =
+        normalize_operation_type(request->operation_type());
     const auto now_ms = []() -> int64_t {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
                    std::chrono::system_clock::now().time_since_epoch())
@@ -175,8 +177,8 @@ grpc::Status LockServiceImpl::AcquireGuard(
     };
     const int64_t timestamp_unix_ms =
         request->timestamp_unix_ms() > 0 ? request->timestamp_unix_ms() : now_ms();
-    const int64_t point_id = make_numeric_point_id(agent_id, timestamp_unix_ms);
     const int64_t server_received_unix_ms = now_ms();
+    response->set_serving_node_id(node_id_);
 
     if (agent_id.empty()) {
         response->set_granted(false);
@@ -189,58 +191,140 @@ grpc::Status LockServiceImpl::AcquireGuard(
         return grpc::Status::OK;
     }
 
-    std::cout << "[TX " << agent_id << "] attempting acquire" << std::endl;
+    if (raft_ != nullptr && !raft_->IsLeader()) {
+        const std::string leader_redirect = raft_->LeaderAddress();
+        response->set_granted(false);
+        response->set_message("NOT_LEADER");
+        if (!leader_redirect.empty()) {
+            response->set_leader_redirect(leader_redirect);
+            context->AddTrailingMetadata("leader-address", leader_redirect);
+        }
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "NOT_LEADER");
+    }
+
+    std::cout << "[TX " << agent_id << "] attempting acquire op="
+              << operation_type_label(operation_type) << std::endl;
     response->set_server_received_unix_ms(server_received_unix_ms);
-    const AcquireTrace acquire_trace = lock_table_.acquire(agent_id, embedding, theta_);
+
+    // The leader performs semantic admission before proposing ACQUIRE through
+    // Raft. That keeps the hot path simple, but it also means "locally held"
+    // and "durably replicated" are not the same moment in time.
+    const AcquireTrace acquire_trace = lock_table_->acquire(agent_id, embedding, theta_);
     const int64_t lock_acquired_unix_ms = now_ms();
     response->set_lock_acquired_unix_ms(lock_acquired_unix_ms);
     response->set_lock_wait_ms(lock_acquired_unix_ms - server_received_unix_ms);
     response->set_blocking_similarity_score(acquire_trace.blocking_similarity_score);
+    response->set_wait_position(acquire_trace.wait_position);
+    response->set_wake_count(acquire_trace.wake_count);
+    response->set_queue_hops(acquire_trace.queue_hops);
+    response->set_active_lock_count(static_cast<int32_t>(lock_table_->size()));
     if (!acquire_trace.blocking_agent_id.empty()) {
         response->set_blocking_agent_id(acquire_trace.blocking_agent_id);
     }
     std::cout << "[TX " << agent_id << "] acquired lock (active count = "
-              << lock_table_.size() << ")" << std::endl;
+              << lock_table_->size() << ")" << std::endl;
 
-    bool released = false;
-    auto release_once = [&]() {
-        if (!released) {
-            lock_table_.release(agent_id);
-            released = true;
-            std::cout << "[TX " << agent_id << "] released lock (active count = "
-                      << lock_table_.size() << ")" << std::endl;
+    auto propose_timeout = std::chrono::milliseconds(raft_propose_timeout_ms_);
+    dscc_raft::LogEntry acquire_entry;
+    acquire_entry.set_op_type(dscc_raft::LogEntry::ACQUIRE);
+    acquire_entry.set_agent_id(agent_id);
+    acquire_entry.set_theta(theta_);
+    for (float value : embedding) {
+        acquire_entry.add_embedding(value);
+    }
+
+    int64_t acquire_log_index = 0;
+    if (raft_ != nullptr &&
+        !raft_->Propose(acquire_entry, propose_timeout, &acquire_log_index)) {
+        lock_table_->release(agent_id);
+        response->set_granted(false);
+        response->set_message("Raft quorum not reached for ACQUIRE");
+        return grpc::Status(grpc::StatusCode::UNAVAILABLE,
+                            "Raft quorum not reached for ACQUIRE");
+    }
+
+    bool release_committed = false;
+    auto commit_release_once = [&]() -> bool {
+        if (release_committed) {
+            return true;
         }
-    };
-    ScopeExit release_guard(release_once);
 
-    const bool qdrant_ok = upsert_embedding_to_qdrant(point_id,
-                                                      agent_id,
-                                                      payload_text,
-                                                      source_file,
-                                                      timestamp_unix_ms,
-                                                      embedding);
+        dscc_raft::LogEntry release_entry;
+        release_entry.set_op_type(dscc_raft::LogEntry::RELEASE);
+        release_entry.set_agent_id(agent_id);
+
+        int64_t release_log_index = 0;
+        if (raft_ != nullptr) {
+            if (!raft_->Propose(release_entry, propose_timeout, &release_log_index)) {
+                return false;
+            }
+            if (!raft_->WaitUntilApplied(release_log_index, propose_timeout)) {
+                return false;
+            }
+        } else {
+            lock_table_->release(agent_id);
+        }
+
+        release_committed = true;
+        response->set_lock_released_unix_ms(now_ms());
+        std::cout << "[TX " << agent_id << "] released lock (active count = "
+                  << lock_table_->size() << ")" << std::endl;
+        return true;
+    };
+    // Make release best-effort on every exit path so local lock ownership does
+    // not leak if Qdrant or Raft fails after the acquire step.
+    ScopeExit release_guard([&]() {
+        if (!release_committed) {
+            const bool ok = commit_release_once();
+            if (!ok) {
+                std::cout << "[TX " << agent_id
+                          << "] release replication failed during cleanup" << std::endl;
+            }
+        }
+    });
+
+    bool qdrant_ok = false;
+    if (operation_type == dscc::AcquireRequest::OPERATION_TYPE_READ) {
+        qdrant_ok = query_embedding_from_qdrant(agent_id, payload_text, embedding);
+    } else {
+        const int64_t point_id = make_numeric_point_id(agent_id, timestamp_unix_ms);
+        qdrant_ok = upsert_embedding_to_qdrant(point_id,
+                                               agent_id,
+                                               payload_text,
+                                               source_file,
+                                               timestamp_unix_ms,
+                                               embedding);
+    }
     if (!qdrant_ok) {
         response->set_granted(false);
-        response->set_message("qdrant write failed");
+        response->set_message(operation_type == dscc::AcquireRequest::OPERATION_TYPE_READ
+                                  ? "qdrant read failed"
+                                  : "qdrant write failed");
         return grpc::Status::OK;
     }
     response->set_qdrant_write_complete_unix_ms(now_ms());
 
-    if (lock_hold_ms_ > 0) {
+    if (operation_type == dscc::AcquireRequest::OPERATION_TYPE_WRITE &&
+        lock_hold_ms_ > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(lock_hold_ms_));
     }
 
-    release_once();
-    release_guard.dismiss();
+    if (!commit_release_once()) {
+        response->set_granted(false);
+        response->set_message("Raft quorum not reached for RELEASE");
+        return grpc::Status(grpc::StatusCode::UNAVAILABLE,
+                            "Raft quorum not reached for RELEASE");
+    }
 
-    response->set_lock_released_unix_ms(now_ms());
     response->set_granted(true);
-    response->set_message("granted and committed");
+    response->set_message(operation_type == dscc::AcquireRequest::OPERATION_TYPE_READ
+                              ? "read granted and committed"
+                              : "write granted and committed");
     return grpc::Status::OK;
 }
 
 grpc::Status LockServiceImpl::ReleaseGuard(
-    grpc::ServerContext*,
+    grpc::ServerContext* context,
     const dscc::ReleaseRequest* request,
     dscc::ReleaseResponse* response) {
     const std::string agent_id = request->agent_id();
@@ -249,9 +333,36 @@ grpc::Status LockServiceImpl::ReleaseGuard(
         return grpc::Status::OK;
     }
 
-    lock_table_.release(agent_id);
+    if (raft_ != nullptr && !raft_->IsLeader()) {
+        const std::string leader_redirect = raft_->LeaderAddress();
+        if (!leader_redirect.empty()) {
+            context->AddTrailingMetadata("leader-address", leader_redirect);
+        }
+        response->set_success(false);
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "NOT_LEADER");
+    }
+
+    dscc_raft::LogEntry release_entry;
+    release_entry.set_op_type(dscc_raft::LogEntry::RELEASE);
+    release_entry.set_agent_id(agent_id);
+
+    int64_t release_log_index = 0;
+    if (raft_ != nullptr) {
+        if (!raft_->Propose(release_entry,
+                            std::chrono::milliseconds(raft_propose_timeout_ms_),
+                            &release_log_index)) {
+            response->set_success(false);
+            return grpc::Status(grpc::StatusCode::UNAVAILABLE,
+                                "Raft quorum not reached for RELEASE");
+        }
+        raft_->WaitUntilApplied(release_log_index,
+                                std::chrono::milliseconds(raft_propose_timeout_ms_));
+    } else {
+        lock_table_->release(agent_id);
+    }
+
     std::cout << "[TX " << agent_id << "] released lock (active count = "
-              << lock_table_.size() << ")" << std::endl;
+              << lock_table_->size() << ")" << std::endl;
     response->set_success(true);
     return grpc::Status::OK;
 }
@@ -317,6 +428,43 @@ bool LockServiceImpl::upsert_embedding_to_qdrant(
         }
         return false;
     }
+    return false;
+}
+
+bool LockServiceImpl::query_embedding_from_qdrant(
+    const std::string& agent_id,
+    const std::string& payload_text,
+    const std::vector<float>& embedding) const {
+    if (embedding.empty()) {
+        return false;
+    }
+
+    std::ostringstream body;
+    body << "{\"vector\":[";
+    for (size_t i = 0; i < embedding.size(); ++i) {
+        if (i > 0) {
+            body << ",";
+        }
+        body << std::setprecision(8) << embedding[i];
+    }
+    body << "],\"limit\":3,\"with_payload\":false,\"with_vector\":false}";
+
+    const std::string target = "/collections/" + qdrant_collection_ + "/points/search";
+    int status_code = 0;
+    std::string response_body;
+    if (!send_http_json("POST", target, body.str(), status_code, response_body)) {
+        std::cout << "[QDRANT] read request failed for agent_id=" << agent_id
+                  << " target=" << target << std::endl;
+        return false;
+    }
+    if (status_code == 200) {
+        return true;
+    }
+
+    std::cout << "[QDRANT] read failed for agent_id=" << agent_id
+              << " status=" << status_code
+              << " payload_text=" << payload_text
+              << " response=" << response_body << std::endl;
     return false;
 }
 

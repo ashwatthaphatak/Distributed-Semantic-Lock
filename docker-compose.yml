@@ -1,6 +1,5 @@
-# Runs the end-to-end demo stack: Ollama embeddings, Qdrant, and dscc-node.
-# e2e_bench.cpp brings this stack up before it starts any scenario traffic.
-# DSCC_THETA and DSCC_LOCK_HOLD_MS control the lock behavior inside dscc-node.
+# Runs the distributed end-to-end stack: Ollama embeddings, Qdrant, three dscc nodes, and a leader-aware proxy.
+# e2e_bench.cpp brings this stack up before it starts scenario traffic.
 
 services:
   qdrant:
@@ -15,14 +14,24 @@ services:
     volumes:
       - ./.cache/ollama:/root/.ollama
 
-  dscc-node:
+  dscc-node-1:
     build:
       context: .
       dockerfile: docker/Dockerfile
+    command: ["./build/dscc-node"]
     environment:
+      - NODE_ID=node-1
       - PORT=50051
+      - RAFT_PORT=50061
+      - ADVERTISE_HOST=dscc-node-1
+      - PEERS=dscc-node-2:50061,dscc-node-3:50061,dscc-node-4:50061,dscc-node-5:50061
       - THETA=${DSCC_THETA:-0.78}
       - LOCK_HOLD_MS=${DSCC_LOCK_HOLD_MS:-750}
+      - RAFT_PROPOSE_TIMEOUT_MS=5000
+      - HEARTBEAT_MS=75
+      - ELECTION_TIMEOUT_MIN_MS=600
+      - ELECTION_TIMEOUT_MAX_MS=1000
+      - RAFT_RPC_TIMEOUT_MS=150
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-dscc_memory_e2e}
@@ -31,3 +40,136 @@ services:
       - embedding-service
     ports:
       - "50051:50051"
+      - "50061:50061"
+
+  dscc-node-2:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: ["./build/dscc-node"]
+    environment:
+      - NODE_ID=node-2
+      - PORT=50051
+      - RAFT_PORT=50061
+      - ADVERTISE_HOST=dscc-node-2
+      - PEERS=dscc-node-1:50061,dscc-node-3:50061,dscc-node-4:50061,dscc-node-5:50061
+      - THETA=${DSCC_THETA:-0.78}
+      - LOCK_HOLD_MS=${DSCC_LOCK_HOLD_MS:-750}
+      - RAFT_PROPOSE_TIMEOUT_MS=5000
+      - HEARTBEAT_MS=75
+      - ELECTION_TIMEOUT_MIN_MS=600
+      - ELECTION_TIMEOUT_MAX_MS=1000
+      - RAFT_RPC_TIMEOUT_MS=150
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-dscc_memory_e2e}
+    depends_on:
+      - qdrant
+      - embedding-service
+    ports:
+      - "50052:50051"
+      - "50062:50061"
+
+  dscc-node-3:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: ["./build/dscc-node"]
+    environment:
+      - NODE_ID=node-3
+      - PORT=50051
+      - RAFT_PORT=50061
+      - ADVERTISE_HOST=dscc-node-3
+      - PEERS=dscc-node-1:50061,dscc-node-2:50061,dscc-node-4:50061,dscc-node-5:50061
+      - THETA=${DSCC_THETA:-0.78}
+      - LOCK_HOLD_MS=${DSCC_LOCK_HOLD_MS:-750}
+      - RAFT_PROPOSE_TIMEOUT_MS=5000
+      - HEARTBEAT_MS=75
+      - ELECTION_TIMEOUT_MIN_MS=600
+      - ELECTION_TIMEOUT_MAX_MS=1000
+      - RAFT_RPC_TIMEOUT_MS=150
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-dscc_memory_e2e}
+    depends_on:
+      - qdrant
+      - embedding-service
+    ports:
+      - "50053:50051"
+      - "50063:50061"
+
+  dscc-node-4:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: ["./build/dscc-node"]
+    environment:
+      - NODE_ID=node-4
+      - PORT=50051
+      - RAFT_PORT=50061
+      - ADVERTISE_HOST=dscc-node-4
+      - PEERS=dscc-node-1:50061,dscc-node-2:50061,dscc-node-3:50061,dscc-node-5:50061
+      - THETA=${DSCC_THETA:-0.78}
+      - LOCK_HOLD_MS=${DSCC_LOCK_HOLD_MS:-750}
+      - RAFT_PROPOSE_TIMEOUT_MS=5000
+      - HEARTBEAT_MS=75
+      - ELECTION_TIMEOUT_MIN_MS=600
+      - ELECTION_TIMEOUT_MAX_MS=1000
+      - RAFT_RPC_TIMEOUT_MS=150
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-dscc_memory_e2e}
+    depends_on:
+      - qdrant
+      - embedding-service
+    ports:
+      - "50054:50051"
+      - "50064:50061"
+
+  dscc-node-5:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: ["./build/dscc-node"]
+    environment:
+      - NODE_ID=node-5
+      - PORT=50051
+      - RAFT_PORT=50061
+      - ADVERTISE_HOST=dscc-node-5
+      - PEERS=dscc-node-1:50061,dscc-node-2:50061,dscc-node-3:50061,dscc-node-4:50061
+      - THETA=${DSCC_THETA:-0.78}
+      - LOCK_HOLD_MS=${DSCC_LOCK_HOLD_MS:-750}
+      - RAFT_PROPOSE_TIMEOUT_MS=5000
+      - HEARTBEAT_MS=75
+      - ELECTION_TIMEOUT_MIN_MS=600
+      - ELECTION_TIMEOUT_MAX_MS=1000
+      - RAFT_RPC_TIMEOUT_MS=150
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-dscc_memory_e2e}
+    depends_on:
+      - qdrant
+      - embedding-service
+    ports:
+      - "50055:50051"
+      - "50065:50061"
+
+  dscc-proxy:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: ["./build/dscc-proxy"]
+    environment:
+      - PROXY_PORT=50050
+      - BACKEND_NODES=dscc-node-1:50051,dscc-node-2:50051,dscc-node-3:50051,dscc-node-4:50051,dscc-node-5:50051
+      - LEADER_POLL_MS=100
+      - LEADER_RPC_TIMEOUT_MS=750
+      - REQUEST_TIMEOUT_MS=35000
+    depends_on:
+      - dscc-node-1
+      - dscc-node-2
+      - dscc-node-3
+      - dscc-node-4
+      - dscc-node-5
+    ports:
+      - "50050:50050"

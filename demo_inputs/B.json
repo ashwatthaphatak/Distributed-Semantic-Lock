@@ -1,0 +1,26 @@
+{
+  "agent_name": "Brooke",
+  "role": "Safety and Code Compliance Agent",
+  "personality": "Conservative and detail-oriented, always prioritizing occupant safety and code readiness.",
+  "objective": "Ensure design decisions align with fire/life safety and regulatory requirements from the start.",
+  "payload": "Review the massing concept and prioritize passive cooling, daylight access, and low-carbon material options for the civic annex.",
+  "scheduled_offset_ms": 60,
+  "operation": "read",
+  "payload_schedule": [
+    {
+      "scheduled_offset_ms": 60,
+      "operation": "read",
+      "payload": "Review the massing concept and prioritize passive cooling, daylight access, and low-carbon material options for the civic annex."
+    },
+    {
+      "scheduled_offset_ms": 260,
+      "operation": "read",
+      "payload": "Validate stair pressurization concept and identify coordination risks with mechanical shafts and refuge areas."
+    },
+    {
+      "scheduled_offset_ms": 520,
+      "operation": "write",
+      "payload": "Audit current plans for accessibility and emergency responder access conflicts before permit set drafting."
+    }
+  ]
+}

@@ -10,67 +10,134 @@
 #include <iomanip>
 #include <sstream>
 
+namespace {
+
+std::string format_similarity(float value) {
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(3) << value;
+    return out.str();
+}
+
+}  // namespace
+
 AcquireTrace ActiveLockTable::acquire(const std::string& agent_id,
                                       const std::vector<float>& embedding,
                                       float threshold) {
     std::unique_lock<std::mutex> lock(mu_);
-    AcquireTrace aggregate_trace;
+    AcquireTrace trace;
+    bool granted_by_handoff = false;
+
     while (true) {
-        const AcquireTrace overlap = overlap_trace(embedding, threshold);
-        if (!overlap.waited) {
+        const ConflictTrace conflict = find_conflict_locked(embedding, threshold);
+        if (conflict.lock == nullptr) {
+            apply_acquire_locked(agent_id, embedding, threshold);
             break;
         }
 
-        aggregate_trace.waited = true;
-        if (overlap.blocking_similarity_score >= aggregate_trace.blocking_similarity_score) {
-            aggregate_trace.blocking_similarity_score = overlap.blocking_similarity_score;
-            aggregate_trace.blocking_agent_id = overlap.blocking_agent_id;
+        std::shared_ptr<WaitQueueEntry> waiter = std::make_shared<WaitQueueEntry>();
+        waiter->waiting_agent_id = agent_id;
+        waiter->embedding = embedding;
+        waiter->theta = threshold;
+        waiter->cv = std::make_shared<std::condition_variable>();
+        conflict.lock->waiters.push_back(waiter);
+
+        trace.waited = true;
+        if (conflict.similarity >= trace.blocking_similarity_score) {
+            trace.blocking_similarity_score = conflict.similarity;
+            trace.blocking_agent_id = conflict.lock->agent_id;
+        }
+        if (trace.wait_position == 0) {
+            trace.wait_position = static_cast<int>(conflict.lock->waiters.size());
         }
 
         std::ostringstream oss;
-        oss << "[LOCK] " << agent_id
-            << " blocked by " << overlap.blocking_agent_id
-            << " similarity=" << std::fixed << std::setprecision(3)
-            << overlap.blocking_similarity_score
-            << " threshold=" << threshold;
+        oss << "[LOCK_QUEUE] agent=" << agent_id
+            << " waiting_on=" << conflict.lock->agent_id
+            << " similarity=" << format_similarity(conflict.similarity)
+            << " queue_position=" << conflict.lock->waiters.size()
+            << " theta=" << format_similarity(threshold);
         log_line(oss.str());
-        cv_.wait(lock);
+
+        waiter->cv->wait(lock, [&waiter]() { return waiter->ready; });
+        waiter->ready = false;
+        ++trace.wake_count;
+        trace.queue_hops = waiter->queue_hops;
+
+        // A releaser can hand ownership to the waiter directly if rechecking
+        // found no remaining conflict, so the waiter must not reacquire again.
+        if (waiter->granted) {
+            granted_by_handoff = true;
+            break;
+        }
     }
 
-    active_.push_back(SemanticLock{agent_id, embedding, threshold});
     lock.unlock();
-    print_active_locks();
-    return aggregate_trace;
+    if (!granted_by_handoff) {
+        print_active_locks();
+    }
+    return trace;
 }
 
 void ActiveLockTable::release(const std::string& agent_id) {
+    bool removed = false;
+    std::vector<std::shared_ptr<WaitQueueEntry>> granted_waiters;
     {
         std::lock_guard<std::mutex> lock(mu_);
-        auto it = std::remove_if(active_.begin(), active_.end(),
-                                 [&](const SemanticLock& entry) {
-                                     return entry.agent_id == agent_id;
-                                 });
-        active_.erase(it, active_.end());
+        std::deque<std::shared_ptr<WaitQueueEntry>> waiters =
+            remove_lock_locked(agent_id, removed);
+        if (!removed) {
+            log_line("WARN: release called for unknown agent_id " + agent_id);
+            return;
+        }
+        rebalance_waiters_locked(std::move(waiters), granted_waiters);
     }
 
-    cv_.notify_all();
+    print_active_locks();
+    for (const auto& waiter : granted_waiters) {
+        waiter->cv->notify_all();
+    }
+}
+
+void ActiveLockTable::apply_acquire(const std::string& agent_id,
+                                    const std::vector<float>& embedding,
+                                    float threshold) {
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        apply_acquire_locked(agent_id, embedding, threshold);
+    }
     print_active_locks();
 }
 
+void ActiveLockTable::apply_release(const std::string& agent_id) {
+    release(agent_id);
+}
+
 size_t ActiveLockTable::size() const {
+    return active_count();
+}
+
+size_t ActiveLockTable::active_count() const {
     std::lock_guard<std::mutex> lock(mu_);
     return active_.size();
 }
 
-void ActiveLockTable::print_active_locks() const {
+std::vector<std::string> ActiveLockTable::active_agent_ids() const {
     std::vector<std::string> agent_ids;
     {
         std::lock_guard<std::mutex> lock(mu_);
         agent_ids.reserve(active_.size());
-        for (const auto& entry : active_) {
-            agent_ids.push_back(entry.agent_id);
+        for (const auto& [agent_id, entry] : active_) {
+            (void)entry;
+            agent_ids.push_back(agent_id);
         }
     }
+
+    std::sort(agent_ids.begin(), agent_ids.end());
+    return agent_ids;
+}
+
+void ActiveLockTable::print_active_locks() const {
+    const std::vector<std::string> agent_ids = active_agent_ids();
 
     std::ostringstream oss;
     oss << "ActiveLocks: [";
@@ -85,19 +152,95 @@ void ActiveLockTable::print_active_locks() const {
     log_line(oss.str());
 }
 
-AcquireTrace ActiveLockTable::overlap_trace(const std::vector<float>& embedding,
-                                            float threshold) {
-    AcquireTrace trace;
-    for (const auto& entry : active_) {
+ActiveLockTable::ConflictTrace ActiveLockTable::find_conflict_locked(
+    const std::vector<float>& embedding,
+    float threshold) {
+    ConflictTrace best;
+    for (auto& [agent_id, entry] : active_) {
+        (void)agent_id;
         const float similarity = cosine_similarity(embedding, entry.centroid);
         if (similarity >= threshold &&
-            similarity >= trace.blocking_similarity_score) {
-            trace.waited = true;
-            trace.blocking_similarity_score = similarity;
-            trace.blocking_agent_id = entry.agent_id;
+            (best.lock == nullptr || similarity >= best.similarity)) {
+            best.lock = &entry;
+            best.similarity = similarity;
         }
     }
-    return trace;
+    return best;
+}
+
+void ActiveLockTable::apply_acquire_locked(const std::string& agent_id,
+                                           const std::vector<float>& embedding,
+                                           float threshold) {
+    auto it = active_.find(agent_id);
+    if (it != active_.end()) {
+        it->second.centroid = embedding;
+        it->second.threshold = threshold;
+        return;
+    }
+
+    SemanticLock lock_entry;
+    lock_entry.agent_id = agent_id;
+    lock_entry.centroid = embedding;
+    lock_entry.threshold = threshold;
+    active_.emplace(agent_id, std::move(lock_entry));
+}
+
+std::deque<std::shared_ptr<WaitQueueEntry>> ActiveLockTable::remove_lock_locked(
+    const std::string& agent_id,
+    bool& removed) {
+    auto it = active_.find(agent_id);
+    if (it == active_.end()) {
+        removed = false;
+        return {};
+    }
+
+    removed = true;
+    std::deque<std::shared_ptr<WaitQueueEntry>> waiters = std::move(it->second.waiters);
+    active_.erase(it);
+    return waiters;
+}
+
+void ActiveLockTable::rebalance_waiters_locked(
+    std::deque<std::shared_ptr<WaitQueueEntry>> waiters,
+    std::vector<std::shared_ptr<WaitQueueEntry>>& granted_waiters) {
+    while (!waiters.empty()) {
+        std::shared_ptr<WaitQueueEntry> waiter = waiters.front();
+        waiters.pop_front();
+
+        const ConflictTrace conflict =
+            find_conflict_locked(waiter->embedding, waiter->theta);
+        if (conflict.lock != nullptr) {
+            // The original blocker is gone, but a different active semantic
+            // region still conflicts, so move the waiter to that lock's queue.
+            waiter->ready = false;
+            waiter->granted = false;
+            ++waiter->queue_hops;
+            conflict.lock->waiters.push_back(waiter);
+
+            std::ostringstream oss;
+            oss << "[LOCK_REQUEUE] agent=" << waiter->waiting_agent_id
+                << " waiting_on=" << conflict.lock->agent_id
+                << " similarity=" << format_similarity(conflict.similarity)
+                << " queue_position=" << conflict.lock->waiters.size()
+                << " queue_hops=" << waiter->queue_hops
+                << " theta=" << format_similarity(waiter->theta);
+            log_line(oss.str());
+            continue;
+        }
+
+        apply_acquire_locked(waiter->waiting_agent_id,
+                             waiter->embedding,
+                             waiter->theta);
+        waiter->granted = true;
+        waiter->ready = true;
+
+        std::ostringstream oss;
+        oss << "[LOCK_GRANT] agent=" << waiter->waiting_agent_id
+            << " queue_hops=" << waiter->queue_hops
+            << " active_locks=" << active_.size();
+        log_line(oss.str());
+        granted_waiters.push_back(std::move(waiter));
+    }
 }
 
 float ActiveLockTable::cosine_similarity(const std::vector<float>& a,

@@ -53,6 +53,7 @@ m4/
 *.pid
 *.seed
 *.stackdump
+logs/
 
 # Editors / IDEs
 .vscode/
@@ -68,7 +69,13 @@ Thumbs.db
 # Local runtime data
 .cache/
 ollama_data/
-logs/
 
-# Claude code 
+# Generated protobuf checked into source by mistake; CMake generates fresh code
+# under the build directory instead.
+proto/*.pb.h
+proto/*.pb.cc
+proto/*.grpc.pb.h
+proto/*.grpc.pb.cc
+
+# Claude code
 CLAUDE.md

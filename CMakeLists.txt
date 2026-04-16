@@ -1,6 +1,6 @@
-# Builds the current DSCC binaries and generates gRPC/protobuf code from dscc.proto.
-# The main targets are dscc-node for the server and dscc-e2e-bench for the live demo.
-# A smaller dscc-testbench target remains for lock-table-only development checks.
+# Builds the current DSCC binaries and generates gRPC/protobuf code into the
+# build directory. The checked-in generated protobuf artifacts are intentionally
+# not used by CMake.
 
 cmake_minimum_required(VERSION 3.16)
 project(dscc)
@@ -36,40 +36,43 @@ endif()
 
 find_program(GRPC_CPP_PLUGIN_EXECUTABLE grpc_cpp_plugin REQUIRED)
 
-set(DSCC_PROTO_FILE ${CMAKE_CURRENT_SOURCE_DIR}/proto/dscc.proto)
 set(DSCC_GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
 file(MAKE_DIRECTORY ${DSCC_GENERATED_DIR})
 
-set(DSCC_PROTO_SRCS
-    ${DSCC_GENERATED_DIR}/dscc.pb.cc
-    ${DSCC_GENERATED_DIR}/dscc.grpc.pb.cc
-)
+function(dscc_add_proto proto_stem)
+    set(proto_file ${CMAKE_CURRENT_SOURCE_DIR}/proto/${proto_stem}.proto)
+    set(pb_cc ${DSCC_GENERATED_DIR}/${proto_stem}.pb.cc)
+    set(pb_h ${DSCC_GENERATED_DIR}/${proto_stem}.pb.h)
+    set(grpc_cc ${DSCC_GENERATED_DIR}/${proto_stem}.grpc.pb.cc)
+    set(grpc_h ${DSCC_GENERATED_DIR}/${proto_stem}.grpc.pb.h)
 
-set(DSCC_PROTO_HDRS
-    ${DSCC_GENERATED_DIR}/dscc.pb.h
-    ${DSCC_GENERATED_DIR}/dscc.grpc.pb.h
-)
+    add_custom_command(
+        OUTPUT ${pb_cc} ${pb_h}
+        COMMAND ${Protobuf_PROTOC_EXECUTABLE}
+                --cpp_out=${DSCC_GENERATED_DIR}
+                -I ${CMAKE_CURRENT_SOURCE_DIR}/proto
+                ${proto_file}
+        DEPENDS ${proto_file}
+        VERBATIM
+    )
 
-add_custom_command(
-    OUTPUT ${DSCC_GENERATED_DIR}/dscc.pb.cc ${DSCC_GENERATED_DIR}/dscc.pb.h
-    COMMAND ${Protobuf_PROTOC_EXECUTABLE}
-            --cpp_out=${DSCC_GENERATED_DIR}
-            -I ${CMAKE_CURRENT_SOURCE_DIR}/proto
-            ${DSCC_PROTO_FILE}
-    DEPENDS ${DSCC_PROTO_FILE}
-    VERBATIM
-)
+    add_custom_command(
+        OUTPUT ${grpc_cc} ${grpc_h}
+        COMMAND ${Protobuf_PROTOC_EXECUTABLE}
+                --grpc_out=${DSCC_GENERATED_DIR}
+                --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN_EXECUTABLE}
+                -I ${CMAKE_CURRENT_SOURCE_DIR}/proto
+                ${proto_file}
+        DEPENDS ${proto_file}
+        VERBATIM
+    )
 
-add_custom_command(
-    OUTPUT ${DSCC_GENERATED_DIR}/dscc.grpc.pb.cc ${DSCC_GENERATED_DIR}/dscc.grpc.pb.h
-    COMMAND ${Protobuf_PROTOC_EXECUTABLE}
-            --grpc_out=${DSCC_GENERATED_DIR}
-            --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN_EXECUTABLE}
-            -I ${CMAKE_CURRENT_SOURCE_DIR}/proto
-            ${DSCC_PROTO_FILE}
-    DEPENDS ${DSCC_PROTO_FILE}
-    VERBATIM
-)
+    set(DSCC_PROTO_SRCS ${DSCC_PROTO_SRCS} ${pb_cc} ${grpc_cc} PARENT_SCOPE)
+    set(DSCC_PROTO_HDRS ${DSCC_PROTO_HDRS} ${pb_h} ${grpc_h} PARENT_SCOPE)
+endfunction()
+
+dscc_add_proto(dscc)
+dscc_add_proto(dscc_raft)
 
 add_library(dscc_proto STATIC
     ${DSCC_PROTO_SRCS}
@@ -91,6 +94,8 @@ add_executable(dscc-node
     src/threadsafe_log.cpp
     src/active_lock_table.cpp
     src/lock_service_impl.cpp
+    src/raft_node.cpp
+    src/raft_service_impl.cpp
 )
 
 target_include_directories(dscc-node PRIVATE ${DSCC_GENERATED_DIR})
@@ -114,8 +119,6 @@ target_link_libraries(dscc-testbench
 add_executable(dscc-e2e-bench
     src/e2e_bench.cpp
     src/threadsafe_log.cpp
-    src/lock_service_impl.cpp
-    src/active_lock_table.cpp
 )
 
 target_include_directories(dscc-e2e-bench PRIVATE ${DSCC_GENERATED_DIR})
@@ -128,3 +131,46 @@ target_link_libraries(dscc-e2e-bench
 
 target_compile_features(dscc-e2e-bench PRIVATE cxx_std_20)
 target_compile_definitions(dscc-e2e-bench PRIVATE DSLM_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+
+add_executable(dscc-benchmark
+    src/benchmark_runner.cpp
+)
+
+target_include_directories(dscc-benchmark PRIVATE ${DSCC_GENERATED_DIR})
+target_link_libraries(dscc-benchmark
+    dscc_proto
+    ${DSLM_GRPC_TARGET}
+    protobuf::libprotobuf
+    Threads::Threads
+)
+
+target_compile_features(dscc-benchmark PRIVATE cxx_std_20)
+target_compile_definitions(dscc-benchmark PRIVATE DSLM_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+
+add_executable(dscc-proxy
+    src/proxy_main.cpp
+    src/proxy_service_impl.cpp
+)
+
+target_include_directories(dscc-proxy PRIVATE ${DSCC_GENERATED_DIR})
+target_link_libraries(dscc-proxy
+    dscc_proto
+    ${DSLM_GRPC_TARGET}
+    protobuf::libprotobuf
+    Threads::Threads
+)
+
+add_executable(dscc-raft-test
+    src/raft_test.cpp
+    src/threadsafe_log.cpp
+    src/raft_node.cpp
+    src/raft_service_impl.cpp
+)
+
+target_include_directories(dscc-raft-test PRIVATE ${DSCC_GENERATED_DIR})
+target_link_libraries(dscc-raft-test
+    dscc_proto
+    ${DSLM_GRPC_TARGET}
+    protobuf::libprotobuf
+    Threads::Threads
+)

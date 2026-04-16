@@ -1,0 +1,26 @@
+{
+  "agent_name": "Ari",
+  "role": "Sustainability-Focused Design Agent",
+  "personality": "Values low embodied carbon, daylight quality, and long-term energy performance.",
+  "objective": "Guide early architectural decisions toward measurable sustainability outcomes.",
+  "payload": "Review the massing concept and prioritize passive cooling, daylight access, and low-carbon material options for the civic annex.",
+  "scheduled_offset_ms": 0,
+  "operation": "write",
+  "payload_schedule": [
+    {
+      "scheduled_offset_ms": 0,
+      "operation": "write",
+      "payload": "Review the massing concept and prioritize passive cooling, daylight access, and low-carbon material options for the civic annex."
+    },
+    {
+      "scheduled_offset_ms": 220,
+      "operation": "write",
+      "payload": "Flag facade areas with high solar gain and recommend shading strategies with target annual energy impact notes."
+    },
+    {
+      "scheduled_offset_ms": 470,
+      "operation": "read",
+      "payload": "Propose a material shortlist that reduces embodied carbon while maintaining durability for a coastal climate."
+    }
+  ]
+}

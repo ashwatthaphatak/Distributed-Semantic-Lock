@@ -7,6 +7,7 @@
 #include <grpcpp/grpcpp.h>
 #include "dscc.grpc.pb.h"
 #include "active_lock_table.h"
+#include "raft_node.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -15,7 +16,15 @@
 
 class LockServiceImpl final : public dscc::LockService::Service {
 public:
-    LockServiceImpl();
+    LockServiceImpl(RaftNode* raft,
+                    ActiveLockTable* lock_table,
+                    std::string node_id,
+                    float theta,
+                    int lock_hold_ms,
+                    int raft_propose_timeout_ms,
+                    std::string qdrant_host,
+                    std::string qdrant_port,
+                    std::string qdrant_collection);
 
     grpc::Status Ping(grpc::ServerContext* context,
                       const dscc::PingRequest* request,
@@ -37,6 +46,10 @@ private:
                                     int64_t timestamp_unix_ms,
                                     const std::vector<float>& embedding) const;
 
+    bool query_embedding_from_qdrant(const std::string& agent_id,
+                                     const std::string& payload_text,
+                                     const std::vector<float>& embedding) const;
+
     bool ensure_qdrant_collection(size_t vector_size) const;
 
     bool send_http_json(const std::string& method,
@@ -45,9 +58,12 @@ private:
                         int& status_code,
                         std::string& response_body) const;
 
-    ActiveLockTable lock_table_;
+    RaftNode* raft_;
+    ActiveLockTable* lock_table_;
+    std::string node_id_;
     float theta_;
     int lock_hold_ms_;
+    int raft_propose_timeout_ms_;
     std::string qdrant_host_;
     std::string qdrant_port_;
     std::string qdrant_collection_;
