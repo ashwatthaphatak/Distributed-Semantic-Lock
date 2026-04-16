@@ -68,3 +68,4 @@ Thumbs.db
 # Local runtime data
 .cache/
 ollama_data/
+logs/
