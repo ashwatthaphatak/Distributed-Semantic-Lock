@@ -46,6 +46,12 @@ public:
                  std::chrono::milliseconds timeout,
                  int64_t* committed_index = nullptr);
 
+    // Append a log entry without waiting for quorum commit.  Heartbeats will
+    // replicate it eventually.  Used to inject a compensating RELEASE when an
+    // ACQUIRE Propose times out, so the ghost entry cancels itself on all
+    // replicas once both are applied.
+    bool AppendLocalEntry(const dscc_raft::LogEntry& entry);
+
     bool WaitUntilApplied(int64_t index, std::chrono::milliseconds timeout);
 
     dscc_raft::VoteResponse HandleRequestVote(const dscc_raft::VoteRequest& request);

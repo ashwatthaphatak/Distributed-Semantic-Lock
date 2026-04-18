@@ -237,6 +237,12 @@ grpc::Status LockServiceImpl::AcquireGuard(
     if (raft_ != nullptr &&
         !raft_->Propose(acquire_entry, propose_timeout, &acquire_log_index)) {
         lock_table_->release(agent_id);
+
+        dscc_raft::LogEntry compensating;
+        compensating.set_op_type(dscc_raft::LogEntry::RELEASE);
+        compensating.set_agent_id(agent_id);
+        raft_->AppendLocalEntry(compensating);
+
         response->set_granted(false);
         response->set_message("Raft quorum not reached for ACQUIRE");
         return grpc::Status(grpc::StatusCode::UNAVAILABLE,
