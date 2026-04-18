@@ -122,16 +122,19 @@ Each of the 5 `dscc-node` processes is identical. One is elected Raft leader; th
 │  │  Data:   unordered_map<string, SemanticLock>  active_     (keyed by agent_id)            │ │
 │  │          mutex                                 mu_        (protects all state)           │ │
 │  │                                                                                          │ │
-│  │  API:    acquire(agent_id, embedding, θ)   →  blocks caller if conflict, returns trace  │ │
+│  │  API:    wait_for_admission(id, emb, θ)   →  blocks if conflict, inserts PENDING slot   │ │
+│  │          acquire(agent_id, embedding, θ)   →  blocks if conflict, inserts REAL lock     │ │
 │  │          release(agent_id)                 →  removes lock, rebalances waiters           │ │
-│  │          apply_acquire(agent_id, emb, θ)   →  insert without conflict check (Raft path) │ │
+│  │          apply_acquire(agent_id, emb, θ)   →  promote pending or insert (Raft callback) │ │
 │  │          apply_release(agent_id)           →  delegates to release()                    │ │
+│  │          remove_pending(agent_id)          →  remove if still pending, rebalance         │ │
 │  │          size() / active_count()           →  number of active locks                    │ │
 │  │          active_agent_ids()                →  sorted list of held lock agent IDs         │ │
 │  │                                                                                          │ │
 │  │  Internal:                                                                               │ │
 │  │          find_conflict_locked(emb, θ)      →  O(n) scan, returns strongest conflict     │ │
-│  │          apply_acquire_locked(id, emb, θ)  →  insert/update in active_ map              │ │
+│  │          apply_acquire_locked(id, emb, θ)  →  insert or promote pending→real            │ │
+│  │          insert_pending_locked(id, emb, θ) →  insert/update with pending=true           │ │
 │  │          remove_lock_locked(id)            →  erase from active_, return waiters deque   │ │
 │  │          rebalance_waiters_locked(...)     →  re-check each waiter, grant or requeue    │ │
 │  │          cosine_similarity(a, b)           →  double-precision dot/(||a||·||b||)        │ │
@@ -221,6 +224,7 @@ Each of the 5 `dscc-node` processes is identical. One is elected Raft leader; th
 │  │  │  agent_id:   string       (lock owner)                                        │  │   │
 │  │  │  centroid:   vector<float> (384 floats, 1,536 bytes)                          │  │   │
 │  │  │  threshold:  float         (θ used when this lock was acquired)               │  │   │
+│  │  │  pending:    bool          (true=reservation before Raft commit, false=real)  │  │   │
 │  │  │                                                                                │  │   │
 │  │  │  waiters: deque<shared_ptr<WaitQueueEntry>>   ◄── per-lock FIFO queue         │  │   │
 │  │  │  ┌──────────────────────────────────────────────────────────────────────────┐  │  │   │
@@ -286,21 +290,26 @@ Client/Proxy
 │       → add "leader-address" to gRPC trailing metadata                                    │
 │       → return FAILED_PRECONDITION "NOT_LEADER"                                           │
 │                                                                                            │
-│  ③ SEMANTIC ADMISSION (may block)                                                         │
+│  ③ SEMANTIC ADMISSION — PENDING SLOT (may block)                                          │
 │     ┌──────────────────────────────────────────────────────────────────────────────────┐   │
-│     │  lock_table_->acquire(agent_id, embedding, theta_)                              │   │
+│     │  lock_table_->wait_for_admission(agent_id, embedding, theta_)                   │   │
 │     │                                                                                  │   │
-│     │  (See §5 for full algorithm — this call holds mu_ and may cv.wait)              │   │
+│     │  (See §5 for full algorithm — blocks on conflict, inserts PENDING slot)          │   │
 │     │                                                                                  │   │
 │     │  Returns: AcquireTrace { waited, blocking_sim, blocking_agent, position, ...}   │   │
 │     └──────────────────────────────────────────────────────────────────────────────────┘   │
 │     Record lock_acquired_unix_ms = now()                                                  │
 │     Populate response telemetry fields from AcquireTrace                                  │
 │                                                                                            │
-│  ④ RAFT PROPOSE ACQUIRE                                                                   │
+│  ④ RAFT PROPOSE ACQUIRE + WAIT UNTIL APPLIED                                              │
 │     Build LogEntry { term=current, op=ACQUIRE, agent_id, embedding[384], theta }          │
 │     raft_->Propose(entry, 5000ms, &acquire_log_index)                                     │
-│     If quorum fails → lock_table_->release(agent_id), return UNAVAILABLE                  │
+│     If quorum fails → remove_pending + AppendLocalEntry(compensating RELEASE),            │
+│       return UNAVAILABLE                                                                   │
+│     raft_->WaitUntilApplied(acquire_log_index, 5000ms)                                    │
+│       → apply callback promotes pending → real lock on all nodes                           │
+│     If WaitUntilApplied times out → AppendLocalEntry(compensating RELEASE),               │
+│       return UNAVAILABLE                                                                   │
 │                                                                                            │
 │  ⑤ QDRANT OPERATION (under lock)                                                          │
 │     ┌────────────────────────────┐  ┌────────────────────────────────────────────┐         │
@@ -441,8 +450,8 @@ release(agent_id):
     │  │                                                                          │  │
     │  │    ELSE:                                                                 │  │
     │  │      ┌──────────────────────────────────────────────────────────────┐    │  │
-    │  │      │  No conflict — grant via ownership handoff                  │    │  │
-    │  │      │  apply_acquire_locked(waiter.agent_id, emb, θ)             │    │  │
+    │  │      │  No conflict — grant via ownership handoff (pending slot)   │    │  │
+    │  │      │  insert_pending_locked(waiter.agent_id, emb, θ)            │    │  │
     │  │      │  waiter.granted = true                                      │    │  │
     │  │      │  waiter.ready = true                                        │    │  │
     │  │      │  Emit [LOCK_GRANT] log event                               │    │  │
@@ -1064,11 +1073,11 @@ Benchmark                    Proxy                       Leader (node-3)        
     │                          │                              │                           │                 │
     │                          │                              │ ① Validate inputs         │                 │
     │                          │                              │ ② IsLeader? YES           │                 │
-    │                          │                              │ ③ lock_table_.acquire()   │                 │
+    │                          │                              │ ③ wait_for_admission()    │                 │
     │                          │                              │    find_conflict_locked()  │                 │
     │                          │                              │    O(n) scan active locks  │                 │
     │                          │                              │    cos_sim >= θ?           │                 │
-    │                          │                              │    NO → insert into active_│                 │
+    │                          │                              │    NO → insert PENDING     │                 │
     │                          │                              │    (or YES → cv.wait...)   │                 │
     │                          │                              │                           │                 │
     │                          │                              │ ④ Raft Propose(ACQUIRE)   │                 │
@@ -1079,8 +1088,10 @@ Benchmark                    Proxy                       Leader (node-3)        
     │                          │                              │◀──{success, match=N}──────│ (3 of 4 = ok)   │
     │                          │                              │   AdvanceCommitIndex()    │                 │
     │                          │                              │   commit_index_ = N       │                 │
+    │                          │                              │   WaitUntilApplied(N)     │                 │
     │                          │                              │   ApplyLoop: on_commit_   │                 │
     │                          │                              │     apply_acquire(agt_A)  │                 │
+    │                          │                              │     (promotes pending→real)│                 │
     │                          │                              │                           │                 │
     │                          │                              │ ⑤ Qdrant upsert           │                 │
     │                          │                              │───PUT /points?wait=true───────────────────▶│
@@ -1148,7 +1159,7 @@ When sustainability_agent_0 releases:
   rebalance_waiters_locked:
     safety_agent_0: find_conflict against remaining active locks
       vs construction_agent_0: cos_sim = 0.35 → no conflict
-    → GRANT: safety_agent_0 inserted into active_, cv.notify()
+    → GRANT: safety_agent_0 inserted as PENDING into active_, cv.notify()
 
 If instead cos_sim vs construction was 0.82:
     → REQUEUE: safety_agent_0 moved to construction_agent_0's waiters, queue_hops=1
@@ -1195,16 +1206,16 @@ If instead cos_sim vs construction was 0.82:
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                                                                             │
-│  CAVEAT 1: Leader-Admitted-Then-Replicated                                                 │
+│  CAVEAT 1: Leader-Admitted-Then-Replicated  ██ FIXED ██                                   │
 │  ┌─────────────────────────────────────────────────────────────────────────────────────┐   │
-│  │  Current:  acquire() → Propose(ACQUIRE) → Qdrant → Propose(RELEASE)              │   │
-│  │  Correct:  Propose(ACQUIRE) → apply → acquire() → Qdrant → Propose(RELEASE)      │   │
+│  │  Old:   acquire() → Propose(ACQUIRE) → Qdrant → Propose(RELEASE)                 │   │
+│  │  Fixed: wait_for_admission() [pending] → Propose(ACQUIRE)                         │   │
+│  │           → WaitUntilApplied [promote pending→real] → Qdrant → Propose(RELEASE)   │   │
 │  │                                                                                     │   │
-│  │  Risk window: leader crash between acquire() and Propose(ACQUIRE) commit           │   │
-│  │    → lock held locally but never replicated                                        │   │
-│  │    → new leader has no knowledge of it                                             │   │
-│  │    → if Qdrant write also didn't happen: harmless                                  │   │
-│  │    → if Qdrant write DID happen: orphaned write in vector DB                      │   │
+│  │  The leader no longer holds a real lock before Raft commit. A pending              │   │
+│  │  reservation blocks conflicts but is not a committed lock. If Propose              │   │
+│  │  fails, remove_pending cleans up locally, and a compensating RELEASE               │   │
+│  │  is appended to cancel any partially replicated ghost ACQUIRE.                     │   │
 │  └─────────────────────────────────────────────────────────────────────────────────────┘   │
 │                                                                                             │
 │  CAVEAT 2: No Lease/TTL Expiration                                                        │

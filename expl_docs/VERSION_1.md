@@ -72,7 +72,7 @@ The starvation problem is fixed independently of replication, via a redesigned `
 
 ### 1.3 Roles
 
-**Leader node:** The only node that accepts `AcquireGuard` RPCs from the proxy. Runs the conflict-check, updates the local lock table, replicates the operation to followers via Raft log, and writes to Qdrant only after a quorum of followers have acknowledged the log entry.
+**Leader node:** The only node that accepts `AcquireGuard` RPCs from the proxy. Runs the conflict-check, reserves a **pending** slot in the local lock table, replicates the operation to followers via Raft log, waits for the ACQUIRE to be committed and applied (promoting pending → real), and writes to Qdrant only after the lock is durably committed.
 
 **Follower nodes:** Receive replicated log entries from the leader. Apply them to their local lock tables. Do not accept `AcquireGuard` RPCs from agents (proxy ensures this). Available to be elected as leader if the current leader becomes unavailable.
 
@@ -123,6 +123,7 @@ struct SemanticLock {
     std::string agent_id;
     std::vector<float> centroid;
     float threshold;
+    bool pending = false;  // true = reservation before Raft commit, false = fully committed
 
     // FIFO queue of agents waiting specifically because they conflict with
     // this lock. When this lock is released, the front of this queue is
@@ -151,7 +152,7 @@ public:
     void release(const std::string& agent_id);
 
     // Apply a replicated acquire from Raft log (no blocking, no conflict
-    // check — the leader already ran the check before committing to log).
+    // check — promotes pending → real on leader, inserts new on followers).
     void apply_acquire(const std::string& agent_id,
                        const std::vector<float>& embedding,
                        float theta);
@@ -934,31 +935,44 @@ grpc::Status LockServiceImpl::AcquireGuard(
     std::vector<float> embedding(req->embedding().begin(), req->embedding().end());
     auto t_received = now_ms();
 
-    // 3. Acquire semantic lock (may block in per-lock wait queue).
-    AcquireTrace trace = lock_table_->acquire(req->agent_id(), embedding, theta_);
+    // 3. Reserve PENDING slot (may block in per-lock wait queue).
+    AcquireTrace trace = lock_table_->wait_for_admission(req->agent_id(), embedding, theta_);
     auto t_lock_acquired = now_ms();
 
-    // 4. Propose ACQUIRE to Raft log. Must commit to quorum before proceeding.
+    // 4. Propose ACQUIRE to Raft log + wait for commit + apply (promotes pending → real).
     dscc_raft::LogEntry acquire_entry;
     acquire_entry.set_op_type(dscc_raft::LogEntry::ACQUIRE);
     acquire_entry.set_agent_id(req->agent_id());
     for (float f : embedding) acquire_entry.add_embedding(f);
     acquire_entry.set_theta(theta_);
 
-    if (!raft_->Propose(acquire_entry, std::chrono::milliseconds(2000))) {
-        // Raft quorum failed (e.g. too many nodes down). Release local lock
-        // and report failure.
-        lock_table_->release(req->agent_id());
+    int64_t acquire_log_index = -1;
+    if (!raft_->Propose(acquire_entry, std::chrono::milliseconds(propose_timeout_ms), &acquire_log_index)) {
+        // Raft quorum failed. Remove pending slot and append compensating RELEASE.
+        lock_table_->remove_pending(req->agent_id());
+        dscc_raft::LogEntry compensating;
+        compensating.set_op_type(dscc_raft::LogEntry::RELEASE);
+        compensating.set_agent_id(req->agent_id());
+        raft_->AppendLocalEntry(compensating);
         return grpc::Status(grpc::UNAVAILABLE, "Raft quorum not reached for ACQUIRE");
     }
 
-    // 5. Write to Qdrant while holding the semantic lock.
+    if (!raft_->WaitUntilApplied(acquire_log_index, std::chrono::milliseconds(propose_timeout_ms))) {
+        // Apply timed out. Append compensating RELEASE to cancel ghost ACQUIRE.
+        dscc_raft::LogEntry compensating;
+        compensating.set_op_type(dscc_raft::LogEntry::RELEASE);
+        compensating.set_agent_id(req->agent_id());
+        raft_->AppendLocalEntry(compensating);
+        return grpc::Status(grpc::UNAVAILABLE, "ACQUIRE apply timed out");
+    }
+
+    // 5. Write to Qdrant while holding the semantic lock (now Raft-committed).
     ScopeExit release_guard([&]{
         // 7. Propose RELEASE to Raft log.
         dscc_raft::LogEntry release_entry;
         release_entry.set_op_type(dscc_raft::LogEntry::RELEASE);
         release_entry.set_agent_id(req->agent_id());
-        raft_->Propose(release_entry, std::chrono::milliseconds(2000));
+        raft_->Propose(release_entry, std::chrono::milliseconds(propose_timeout_ms));
         // Note: apply_release on the local table happens via on_commit_ callback.
     });
 
@@ -988,7 +1002,11 @@ grpc::Status LockServiceImpl::AcquireGuard(
 }
 ```
 
-**Important note on the acquire-then-propose ordering:** The local `lock_table_->acquire()` happens *before* the Raft `Propose`. This might seem like a correctness issue — we've modified local state before getting quorum. However, note that `acquire()` on followers is driven by `apply_acquire()` via the commit callback, not directly. The leader's local table is authoritative for the conflict check; the Raft log is the mechanism by which that authoritative state is replicated. The ordering is: conflict check → local acquire → propose to quorum → Qdrant write → propose release to quorum → local release (via callback). If Raft quorum fails after local acquire, the `ScopeExit` guard issues a local release and returns UNAVAILABLE.
+**Updated admission ordering (Raft-first with pending/promote):** The leader calls `wait_for_admission()` to block on semantic conflicts and reserve a **pending** slot. This pending slot participates in conflict detection (blocking subsequent conflicting requests) but is not a committed lock. The leader then calls `Propose(ACQUIRE)` to replicate to quorum, followed by `WaitUntilApplied()` which blocks until the apply callback fires and promotes the pending slot to a real lock (`pending = false`). Only after the lock is durably committed does the leader proceed to the Qdrant operation.
+
+If `Propose` fails, `remove_pending` cleans up the pending slot locally and a **compensating RELEASE** is appended via `AppendLocalEntry` to cancel any partially replicated ghost ACQUIRE. If `WaitUntilApplied` times out, a compensating RELEASE is also appended.
+
+The ordering is: conflict check → pending slot → Propose(ACQUIRE) → WaitUntilApplied (promotes pending → real) → Qdrant write → Propose(RELEASE) → WaitUntilApplied → release (via callback).
 
 ---
 
@@ -1037,13 +1055,13 @@ t=1ms   Proxy determines current leader is dscc-node-1:50051
 
 t=2ms   node-1 LockServiceImpl receives request
         node-1 verifies it is leader (raft_->IsLeader() == true)
-        node-1 lock_table_.acquire("agent-A", vec_A, 0.78)
+        node-1 lock_table_.wait_for_admission("agent-A", vec_A, 0.78)
            → find_conflict returns nullptr (no active locks)
-           → active_["agent-A"] = {vec_A, 0.78, {}}
+           → insert_pending_locked: active_["agent-A"] = {vec_A, 0.78, pending=true}
            → returns immediately (no wait)
 
 t=3ms   node-1 creates LogEntry{ACQUIRE, "agent-A", vec_A, 0.78}
-        node-1 appends to local log at index 5
+        node-1 raft_->Propose() appends to local log at index 5
 
 t=3ms   node-1 sends AppendEntries(term=2, prev=4, entries=[entry-5])
         to node-2 and node-3 in parallel
@@ -1051,8 +1069,6 @@ t=3ms   node-1 sends AppendEntries(term=2, prev=4, entries=[entry-5])
 t=5ms   node-2 receives AppendEntries
         node-2 checks prev_log consistency (OK)
         node-2 appends entry-5 to local log
-        node-2 calls apply_acquire("agent-A", vec_A, 0.78)
-          → active_["agent-A"] inserted on node-2 (no blocking — follower)
         node-2 replies AppendResponse{success=true, match_index=5}
 
 t=5ms   node-3 receives AppendEntries (similar to node-2)
@@ -1060,8 +1076,10 @@ t=5ms   node-3 receives AppendEntries (similar to node-2)
 
 t=6ms   node-1 receives majority (both followers acknowledged)
         node-1 advances commit_index to 5
-        node-1 ApplyCommitted thread wakes, calls on_commit_(entry-5)
-          → apply_acquire on node-1's table (already applied above? see note)
+        node-1 ApplyLoop thread wakes, calls on_commit_(entry-5)
+          → apply_acquire on node-1: promotes pending → real (pending=false)
+          → apply_acquire on node-2, node-3: inserts new real lock (no prior pending)
+        node-1 WaitUntilApplied(5) returns — lock is now durable
 
 t=6ms   node-1 proceeds to Qdrant write
         upsert_embedding_to_qdrant("agent-A", vec_A, ...)
@@ -1084,7 +1102,7 @@ t=803ms node-1 returns AcquireResponse{granted=true, lock_wait_ms=1, ...}
         to proxy, proxy forwards to agent
 ```
 
-**Note on double-apply:** In the flow above, the leader applies the operation to the local lock table both in `LockServiceImpl::AcquireGuard` (step at t=2ms) and via the `on_commit_` callback (step at t=6ms). To avoid double-apply, the leader should either skip the callback for entries it proposed (by tagging them) or use the `apply_acquire`/`apply_release` path for all modifications and have `LockServiceImpl` wait for the commit callback before proceeding. The cleanest design: `LockServiceImpl` calls `lock_table_.acquire()` for the blocking wait (which is leader-only behavior), and then waits for Raft commit before calling `lock_table_.apply_acquire()` to actually insert into `active_`. The separation is: `acquire()` does the conflict check and blocks, `apply_acquire()` does the insert.
+**Note on pending/promote (no double-apply):** In the flow above, `wait_for_admission` at t=2ms inserts a **pending** slot (not a real lock). The `on_commit_` callback at t=6ms calls `apply_acquire`, which finds the pending entry and **promotes** it to a real lock (`pending = false`). This is not a double-apply — the pending slot is a reservation, and the promote is the single authoritative insertion. On followers, no pending slot exists, so `apply_acquire` inserts a new real lock directly.
 
 ---
 

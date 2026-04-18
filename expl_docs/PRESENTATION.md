@@ -129,6 +129,7 @@ struct SemanticLock {
     std::string agent_id;
     std::vector<float> centroid;
     float threshold;
+    bool pending = false;  // true = reservation before Raft commit; false = fully committed
     std::deque<std::shared_ptr<WaitQueueEntry>> waiters;  // per-lock FIFO queue
 };
 
@@ -162,7 +163,7 @@ RELEASE(agent_id):
       waiter.queue_hops++                   // track the hop
       emit [LOCK_REQUEUE] log event
     ELSE:
-      apply_acquire(waiter)                 // grant immediately
+      insert_pending(waiter)               // grant pending slot (promoted later via Raft)
       waiter.granted = true                 // handoff: no re-check needed
       waiter.ready = true
       emit [LOCK_GRANT] log event
@@ -252,7 +253,7 @@ message LogEntry {
 ```
 
 Each `AcquireGuard` RPC produces exactly two log entries:
-1. **ACQUIRE** — proposed after the leader grants the local lock
+1. **ACQUIRE** — proposed after the leader reserves a pending slot (conflict gate passed); the apply callback promotes the pending slot to a real lock on all nodes
 2. **RELEASE** — proposed after Qdrant operation + hold time completes
 
 **Raft apply callback on every node:**
@@ -301,9 +302,9 @@ Followers reconstruct lock table state by replaying committed log entries. They 
 3.  Proxy forwards AcquireGuard to leader node
 4.  Leader validates inputs (agent_id non-empty, embedding non-empty)
 5.  Leader checks IsLeader(); if not, returns FAILED_PRECONDITION + leader-address metadata
-6.  Leader calls lock_table_.acquire(agent_id, embedding, θ) — may block in per-lock wait queue
-7.  Once admitted, leader proposes ACQUIRE to Raft log, waits for quorum commit
-8.  If quorum fails → release local lock, return UNAVAILABLE
+6.  Leader calls lock_table_.wait_for_admission(agent_id, embedding, θ) — may block in per-lock wait queue; inserts a PENDING slot on admission
+7.  Leader proposes ACQUIRE to Raft log, waits for quorum commit + WaitUntilApplied (apply callback promotes pending → real lock on all nodes)
+8.  If quorum fails → remove_pending + append compensating RELEASE, return UNAVAILABLE
 9.  Leader performs Qdrant operation:
     - Write: upsert point with embedding + payload metadata (FNV-1a hash ID, 3 retries, 75ms backoff)
     - Read: vector similarity search query
@@ -336,26 +337,27 @@ The proxy (`dscc-proxy`) is a C++ gRPC service that implements the same `LockSer
 
 ---
 
-## Slide 15: Architectural Caveat — Leader-Admitted-Then-Replicated
+## Slide 15: Raft-First Admission — Two-Phase Pending/Promote Design (FIXED)
 
 **The current admission path is:**
 
 ```
-1. Leader: lock_table_.acquire()      ← locally admits request
-2. Leader: raft_->Propose(ACQUIRE)    ← replicates to quorum
-3. Leader: Qdrant operation
-4. Leader: raft_->Propose(RELEASE)    ← replicates release to quorum
-5. Apply callback: release lock, rebalance waiters
+1. Leader: lock_table_.wait_for_admission()  ← blocks on conflict, reserves PENDING slot
+2. Leader: raft_->Propose(ACQUIRE)           ← replicates to quorum
+3. Leader: raft_->WaitUntilApplied()         ← apply callback promotes pending → real
+4. Leader: Qdrant operation
+5. Leader: raft_->Propose(RELEASE)           ← replicates release to quorum
+6. Apply callback: release lock, rebalance waiters
 ```
 
-**Note:** Step 1 happens **before** step 2. The leader holds the lock locally before the ACQUIRE is durably committed through Raft.
+**Design:** Step 1 inserts a *pending* lock that blocks other conflicting requests but is not yet Raft-committed. Steps 2–3 replicate and apply the ACQUIRE, promoting the pending slot to a real lock on **all** nodes. No Qdrant operation happens until the lock is durably committed.
 
-**Why this matters:**
-- If the leader crashes between steps 1 and 2, the lock was never replicated — it simply vanishes. The new leader's lock table doesn't know about it. No harm done (the Qdrant write also didn't happen).
-- If the leader crashes between steps 2 and 3, the ACQUIRE is in the Raft log. The new leader's lock table holds this lock via apply callback, but the agent's RPC timed out and will retry. The retrying agent now conflicts with its own replicated lock — potential deadlock without TTL/lease.
-- If the leader crashes between steps 3 and 4, the write is in Qdrant but RELEASE was never proposed. The lock is held indefinitely on the new leader's table until TTL/lease (not yet implemented).
+**If Propose(ACQUIRE) fails:** The pending slot is removed locally via `remove_pending`, and a compensating RELEASE is appended to the log via `AppendLocalEntry` to cancel any ghost ACQUIRE that may have partially replicated.
 
-**The fully correct approach** would be: replicate ACQUIRE through Raft first, apply, *then* admit locally. We chose the current ordering for simplicity and because the local-first path has lower latency on the hot path. Fixing this is a priority for the next phase.
+**Remaining crash scenarios:**
+- Leader crashes between steps 1 and 2: pending slot is in-memory only, vanishes. Clean state on new leader. **Safe.**
+- Leader crashes between steps 2 and 3: ACQUIRE is committed. New leader has the lock via apply. Client timed out. **Requires TTL/lease** to auto-release.
+- Leader crashes between steps 4 and 5: Qdrant write happened but RELEASE not committed. Lock stuck on new leader. **Requires TTL/lease.**
 
 ---
 
@@ -384,7 +386,7 @@ We implemented Raft from the Ongaro & Ousterhout paper rather than using an exis
 
 2. **Log consistency on follower rejoin**: When a stopped follower restarts and receives `AppendEntries`, the `prev_log_index/prev_log_term` consistency check must correctly handle the follower's log being shorter than expected. We added conflict hints (`conflict_term`, `conflict_index`) in `AppendResponse` for faster rollback.
 
-3. **Apply ordering**: The `ApplyLoop` runs on a dedicated thread. We had a race where `commit_index_` advanced but the apply thread hadn't yet called the callback. The `WaitUntilApplied()` method was added so that `LockServiceImpl` can block on RELEASE being applied before returning to the client.
+3. **Apply ordering**: The `ApplyLoop` runs on a dedicated thread. We had a race where `commit_index_` advanced but the apply thread hadn't yet called the callback. The `WaitUntilApplied()` method was added so that `LockServiceImpl` can block on both ACQUIRE and RELEASE being applied before proceeding.
 
 4. **Leader address propagation**: `AppendRequest` needs `leader_service_address` (the client-facing port), not just `leader_id`. We added this field to the proto so followers can give meaningful redirect information to the proxy.
 
@@ -497,7 +499,7 @@ In the context of the CAP theorem, our system makes the following tradeoffs:
 
 While we target CP, there are practical consistency gaps in the current implementation:
 
-1. **Leader-admitted-then-replicated**: The local acquire happens before the Raft ACQUIRE is committed. If the leader crashes after local acquire but before Raft commit, the lock was "held" briefly without replication. No harm in practice (the Qdrant write also didn't happen), but this violates the strict CP guarantee.
+1. **~~Leader-admitted-then-replicated~~ (FIXED)**: The leader now inserts a *pending* slot before Raft Propose, then waits for the ACQUIRE to be committed and applied (promoting pending → real) before proceeding. If Propose fails, a compensating RELEASE is appended to cancel any partially replicated ghost ACQUIRE. The "locally held before Raft commit" window no longer exists.
 
 2. **No durable lock snapshots**: Active lock state exists only in-memory across the Raft log replay. If all 5 nodes crash simultaneously, lock state is lost. (Raft log is in-memory; no WAL to disk.)
 
@@ -575,7 +577,7 @@ The `AcquireResponse` exposes rich telemetry for every request:
 ## Slide 27: What Remains — Towards Production Readiness
 
 ### Correctness and Reliability
-- [ ] **Fix leader-admitted-then-replicated ordering** — replicate ACQUIRE through Raft first, then admit locally
+- [x] **Fix leader-admitted-then-replicated ordering** — ✅ implemented Raft-first admission with pending/promote two-phase design + compensating RELEASE for ghost lock prevention
 - [ ] **Implement lease/TTL-based lock expiration** — auto-release locks after timeout to prevent indefinite holds from crashed agents
 - [ ] **Durable Raft log** — write-ahead log to disk so lock state survives simultaneous cluster restart
 - [ ] **Lock ownership enforcement** — only the lock holder (or the Raft apply callback) should be able to release a lock
@@ -653,32 +655,33 @@ We plan to systematically study how the theta (θ) threshold affects system beha
 | Read + write paths through semantic admission | ✅ Complete, working |
 | E2E test suite with fault injection (7 scenarios) | ✅ Complete, passing |
 | Curated benchmark suite (10 stress scenarios) | ⚠️ Partial — some scenarios report violations |
-| Leader-admitted-then-replicated fix | ❌ Not yet started |
+| Raft-first admission (pending/promote) + compensating RELEASE | ✅ Complete, working |
 | Lease/TTL lock expiration | ❌ Not yet started |
 | Durable Raft log (WAL) | ❌ Not yet started |
 | Performance evaluation and profiling | ❌ Not yet started |
 | Real agent integration | ❌ Not yet started |
 | Deployable production image | ❌ Not yet started |
 
-**Bottom line:** We have a functioning distributed semantic lock manager with Raft replication, automatic failover, and comprehensive test infrastructure. The core correctness guarantee — semantic serializability — is achieved. The system is not yet production-grade: it needs the admission ordering fix, durable state, lease expiration, performance optimization, and evaluation with real agent workloads.
+**Bottom line:** We have a functioning distributed semantic lock manager with Raft replication, automatic failover, Raft-first admission ordering, and comprehensive test infrastructure. The core correctness guarantee — semantic serializability — is achieved. The system is not yet production-grade: it needs durable state, lease expiration, performance optimization, and evaluation with real agent workloads.
 
 ---
 
 ## Slide 31: Project Timeline and Next Steps
 
-**Completed (Phase 1–4):**
+**Completed (Phase 1–5):**
 - Single-node prototype with Ollama + Qdrant
 - Lock table redesign (global CV → per-lock queues)
 - Custom Raft implementation and integration
 - 5-node cluster deployment
 - Proxy implementation
 - E2E and benchmark test suites
+- Raft-first admission ordering (pending/promote two-phase design)
+- Compensating RELEASE for ghost lock prevention
 
 **Next immediate priorities:**
 1. Root-cause and fix the RAFT_PROPOSE_TIMEOUT_MS issue
-2. Fix leader-admitted-then-replicated ordering (Raft-first admission)
-3. Implement lock lease/TTL expiration
-4. Debug remaining benchmark violations
+2. Implement lock lease/TTL expiration
+3. Debug remaining benchmark violations
 
 **Longer-term goals:**
 5. Durable WAL for Raft log

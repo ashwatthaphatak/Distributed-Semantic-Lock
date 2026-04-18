@@ -31,6 +31,9 @@ struct SemanticLock {
     std::string agent_id;
     std::vector<float> centroid;
     float threshold;
+    // A pending lock reserves a conflict slot before the Raft ACQUIRE is
+    // committed.  apply_acquire promotes it to a real lock once Raft applies.
+    bool pending = false;
     // Waiters are attached to the active lock that currently blocks them most.
     std::deque<std::shared_ptr<WaitQueueEntry>> waiters;
 };
@@ -51,6 +54,17 @@ public:
     AcquireTrace acquire(const std::string& agent_id,
                          const std::vector<float>& embedding,
                          float threshold);
+
+    // Block until no semantic conflict exists, then reserve a pending slot.
+    // The caller must follow up with apply_acquire (via Raft commit) to
+    // promote the slot, or remove_pending to cancel it.
+    AcquireTrace wait_for_admission(const std::string& agent_id,
+                                    const std::vector<float>& embedding,
+                                    float threshold);
+
+    // Remove a pending slot that was never promoted (e.g. Propose failed).
+    // Rebalances any waiters queued behind it.
+    void remove_pending(const std::string& agent_id);
 
     void release(const std::string& agent_id);
 
@@ -82,6 +96,10 @@ private:
     void apply_acquire_locked(const std::string& agent_id,
                               const std::vector<float>& embedding,
                               float threshold);
+
+    void insert_pending_locked(const std::string& agent_id,
+                               const std::vector<float>& embedding,
+                               float threshold);
 
     std::deque<std::shared_ptr<WaitQueueEntry>> remove_lock_locked(
         const std::string& agent_id,

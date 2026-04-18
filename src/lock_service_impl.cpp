@@ -206,10 +206,11 @@ grpc::Status LockServiceImpl::AcquireGuard(
               << operation_type_label(operation_type) << std::endl;
     response->set_server_received_unix_ms(server_received_unix_ms);
 
-    // The leader performs semantic admission before proposing ACQUIRE through
-    // Raft. That keeps the hot path simple, but it also means "locally held"
-    // and "durably replicated" are not the same moment in time.
-    const AcquireTrace acquire_trace = lock_table_->acquire(agent_id, embedding, theta_);
+    // Phase 1: block until no semantic conflict, then reserve a pending slot.
+    // The pending slot participates in conflict detection so no other request
+    // can slip through between admission and Raft commit.
+    const AcquireTrace acquire_trace =
+        lock_table_->wait_for_admission(agent_id, embedding, theta_);
     const int64_t lock_acquired_unix_ms = now_ms();
     response->set_lock_acquired_unix_ms(lock_acquired_unix_ms);
     response->set_lock_wait_ms(lock_acquired_unix_ms - server_received_unix_ms);
@@ -221,10 +222,14 @@ grpc::Status LockServiceImpl::AcquireGuard(
     if (!acquire_trace.blocking_agent_id.empty()) {
         response->set_blocking_agent_id(acquire_trace.blocking_agent_id);
     }
-    std::cout << "[TX " << agent_id << "] acquired lock (active count = "
+    std::cout << "[TX " << agent_id << "] admitted (pending, active count = "
               << lock_table_->size() << ")" << std::endl;
 
     auto propose_timeout = std::chrono::milliseconds(raft_propose_timeout_ms_);
+
+    // Phase 2: replicate ACQUIRE through Raft and wait for commit + apply.
+    // The apply callback (on_commit_) calls apply_acquire which promotes the
+    // pending slot to a real lock on every node.
     dscc_raft::LogEntry acquire_entry;
     acquire_entry.set_op_type(dscc_raft::LogEntry::ACQUIRE);
     acquire_entry.set_agent_id(agent_id);
@@ -234,21 +239,41 @@ grpc::Status LockServiceImpl::AcquireGuard(
     }
 
     int64_t acquire_log_index = 0;
-    if (raft_ != nullptr &&
-        !raft_->Propose(acquire_entry, propose_timeout, &acquire_log_index)) {
-        lock_table_->release(agent_id);
+    if (raft_ != nullptr) {
+        if (!raft_->Propose(acquire_entry, propose_timeout, &acquire_log_index)) {
+            lock_table_->remove_pending(agent_id);
 
-        dscc_raft::LogEntry compensating;
-        compensating.set_op_type(dscc_raft::LogEntry::RELEASE);
-        compensating.set_agent_id(agent_id);
-        raft_->AppendLocalEntry(compensating);
+            dscc_raft::LogEntry compensating;
+            compensating.set_op_type(dscc_raft::LogEntry::RELEASE);
+            compensating.set_agent_id(agent_id);
+            raft_->AppendLocalEntry(compensating);
 
-        response->set_granted(false);
-        response->set_message("Raft quorum not reached for ACQUIRE");
-        return grpc::Status(grpc::StatusCode::UNAVAILABLE,
-                            "Raft quorum not reached for ACQUIRE");
+            response->set_granted(false);
+            response->set_message("Raft quorum not reached for ACQUIRE");
+            return grpc::Status(grpc::StatusCode::UNAVAILABLE,
+                                "Raft quorum not reached for ACQUIRE");
+        }
+
+        if (!raft_->WaitUntilApplied(acquire_log_index, propose_timeout)) {
+            dscc_raft::LogEntry compensating;
+            compensating.set_op_type(dscc_raft::LogEntry::RELEASE);
+            compensating.set_agent_id(agent_id);
+            raft_->AppendLocalEntry(compensating);
+
+            response->set_granted(false);
+            response->set_message("Raft apply timed out for ACQUIRE");
+            return grpc::Status(grpc::StatusCode::UNAVAILABLE,
+                                "Raft apply timed out for ACQUIRE");
+        }
+    } else {
+        lock_table_->apply_acquire(agent_id, embedding, theta_);
     }
 
+    std::cout << "[TX " << agent_id << "] lock promoted (active count = "
+              << lock_table_->size() << ")" << std::endl;
+
+    // Phase 3: Qdrant operation + release.  From this point the lock is a
+    // fully committed, real lock on all replicas.
     bool release_committed = false;
     auto commit_release_once = [&]() -> bool {
         if (release_committed) {
@@ -277,8 +302,6 @@ grpc::Status LockServiceImpl::AcquireGuard(
                   << lock_table_->size() << ")" << std::endl;
         return true;
     };
-    // Make release best-effort on every exit path so local lock ownership does
-    // not leak if Qdrant or Raft fails after the acquire step.
     ScopeExit release_guard([&]() {
         if (!release_committed) {
             const bool ok = commit_release_once();
