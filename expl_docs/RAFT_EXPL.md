@@ -27,6 +27,7 @@ Last updated: 2026-04-18 (branch `fix-raft-logic`)
 14. [Log Messages Reference](#14-log-messages-reference)
 15. [Configuration Reference](#15-configuration-reference)
 16. [Known Limitations and Open Issues](#16-known-limitations-and-open-issues)
+17. [In-Process Raft Regression Testbench (`dscc-raft-test`)](#17-in-process-raft-regression-testbench-dscc-raft-test)
 
 ---
 
@@ -43,7 +44,7 @@ Last updated: 2026-04-18 (branch `fix-raft-logic`)
 | `src/active_lock_table.cpp` | Lock table logic: admission, conflict, release, rebalance |
 | `src/lock_service_impl.h/cpp` | `LockServiceImpl` — bridges Raft + lock table + Qdrant |
 | `src/main.cpp` | Wires everything together, reads env config, starts gRPC server |
-| `src/raft_test.cpp` | In-process 3-node Raft test (election, replication, catch-up) |
+| `src/raft_test.cpp` | In-process 3-node Raft regression suite (`dscc-raft-test`; see §17) |
 
 ---
 
@@ -1233,3 +1234,89 @@ Possible causes:
 - No entry batching means serialized replication
 
 The system works at 5000ms but this masks underlying performance issues.
+
+---
+
+## 17. In-Process Raft Regression Testbench (`dscc-raft-test`)
+
+The binary `dscc-raft-test` (from `src/raft_test.cpp`) spins up **three real gRPC
+servers** on `127.0.0.1`, each hosting a `RaftNode` + `RaftServiceImpl`.  It does
+not link the lock table or Qdrant; it only exercises **election, quorum
+replication, commit/apply ordering, leader failover, follower catch-up after a
+cold restart, and `AppendLocalEntry` replication via heartbeats** — the same
+paths documented in §5–§7 and failure catalog §13 (especially Scenario 8).
+
+### 17.1 Why the old test was flaky
+
+Raft’s `StartElection` collects votes **sequentially** with one RPC timeout per
+peer (see §5.1).  For two peers, the worst-case vote phase is about
+`2 × RAFT_RPC_TIMEOUT_MS`.  If `ELECTION_TIMEOUT_MAX_MS` is **smaller** than that,
+the election timer can fire again while votes are still being collected, causing
+extra elections and unstable leadership.  The testbench therefore uses
+`election_timeout_min_ms = 500`, `election_timeout_max_ms = 800`, and
+`rpc_timeout_ms = 200` so a full vote round fits comfortably inside one
+election window.
+
+### 17.2 Build and run
+
+From a configured build directory (CMake already enables `dscc_proto` / gRPC for
+this target):
+
+```bash
+cmake --build <build-dir> --target dscc-raft-test
+./<build-dir>/dscc-raft-test
+```
+
+Docker / CI: ensure the container or job may **bind localhost TCP ports** in
+the range used by the test (see §17.4).  If `BuildAndStart` fails, the suite logs
+which addresses failed and marks the scenario as FAIL instead of aborting.
+
+**Exit code:** `0` if every check in every scenario passed, `1` if any check
+failed.  A final line prints `[RAFT-TEST] exit 0` or `exit 1`.
+
+### 17.3 How to read the log
+
+Each scenario starts with a banner:
+
+`[RAFT-TEST] === <title> ===`
+
+Individual assertions look like:
+
+`[RAFT-TEST] S3: restarted follower applied all 12 entries: PASS`
+
+or `: FAIL`.  Raft layer messages such as `[RAFT node-1] became leader term=2`
+come from `log_line` in `raft_node.cpp` (§14.1).  At the end:
+
+`[RAFT-TEST] SUMMARY: ALL PASS` or `SUMMARY: FAIL`.
+
+When debugging a regression, grep for `: FAIL` first, then rerun with a single
+scenario temporarily isolated in code if you need a shorter loop.
+
+### 17.4 Scenario matrix (what each block proves)
+
+| ID | Focus | Maps to RAFT_EXPL |
+|----|--------|-------------------|
+| **S1** | Single leader, stable heartbeats, one `Propose` + `WaitUntilApplied`, identical applied streams on all nodes | §7 (commit/apply), Scenario 1 |
+| **S2** | Stop the current leader; replacement leader `Propose`s successfully; surviving replicas apply | §5 election, §13 Scenario 1 / leader loss |
+| **S3** | Non-leader stopped; batch commit with quorum; **cold** replacement node on same addresses; follower log repair + apply; byte-identical applied logs vs leader | §6 replication, §13 **Scenario 8** |
+| **S4** | `AppendLocalEntry` then eventual quorum commit via heartbeats; all nodes apply same sequence | §6.1 / §7.3, §11.4 |
+| **S5** | Lock-shaped **ACQUIRE** then **RELEASE** on one `agent_id`; all nodes match | §9.5 log shape |
+| **S6** | Many sequential `Propose` calls with all peers up; stress on replication + apply | §6–§7 throughput path |
+| **S7** | After leader is known, short window: never more than one `IsLeader()` among live nodes | Sanity check (not a formal safety proof) |
+
+Port layout (per process, derived from `getpid()` so parallel invocations rarely
+collide): a block base `B` yields Raft ports `B+10`, `B+11`, `B+12` and client
+ports `B`, `B+1`, `B+2`.  The first log line prints the concrete addresses.
+
+### 17.5 Limitations of this testbench
+
+- It does **not** persist state: restarted nodes match production “blank disk”
+  behavior (§16.1) and validate catch-up from a live leader, not crash recovery.
+- **InstallSnapshot** is not meaningfully exercised (still a stub in production).
+- No network partition with **two** simultaneous leaders is attempted; S7 only
+  checks the common case on a healthy LAN.
+
+When S3 or S4 fails, inspect **log replication** (`ReplicateToFollower`,
+`HandleAppendEntries`) and **commit rules** (`AdvanceCommitIndexLocked`).  When
+S2 fails, inspect **election timing** and vote handling.  When S5/S6 fail,
+inspect **apply ordering** and `Propose`’s interaction with the heartbeat loop.
