@@ -60,15 +60,22 @@ struct Config {
     std::string qdrant_host = "127.0.0.1";
     std::string qdrant_port = "6333";
     std::string dscc_target = "127.0.0.1:50050";
+
+    // this is currently hardcoded to the testbench. We need to make sure we dynamically populate this map.
     std::vector<std::string> node_targets = {
         "127.0.0.1:50051",
         "127.0.0.1:50052",
         "127.0.0.1:50053",
+        "127.0.0.1:50054",
+        "127.0.0.1:50055",
     };
+    // similarly here
     std::vector<std::string> node_service_names = {
         "dscc-node-1",
         "dscc-node-2",
         "dscc-node-3",
+        "dscc-node-4",
+        "dscc-node-5",
     };
     float theta = 0.78f;
     int lock_hold_ms = 750;
@@ -797,6 +804,10 @@ std::string service_name_for_target(const Config& config, const std::string& tar
     return "";
 }
 
+// NOTE, we need to change this function so that it uses the Config struct to get the service name for the node id.
+/*
+This actually doesn't use config at all and the logic is correct — it just prepends "dscc-" to "node-4" to get "dscc-node-4".
+*/
 std::string service_name_for_node_id(const Config& config, const std::string& node_id) {
     if (node_id.rfind("node-", 0) != 0) {
         return "";
@@ -913,6 +924,13 @@ bool embedding_service_failed(const Config& config,
 }
 
 void start_compose_stack(const Config& config) {
+
+    // checking if the node_targets and node_service_names are the same size. If not, throw an error.
+    if (config.node_targets.size() != config.node_service_names.size()) {
+        throw std::runtime_error(
+            "node_targets and node_service_names must have the same length");
+    }
+
     ::setenv("EMBEDDING_IMAGE", config.embedding_image.c_str(), 1);
     ::setenv("EMBEDDING_MODEL_ID", config.model_id.c_str(), 1);
     ::setenv("INFINITY_IMAGE", config.embedding_image.c_str(), 1);
@@ -933,7 +951,7 @@ void start_compose_stack(const Config& config) {
     const std::string command =
         "cd " + shell_quote(config.project_root) +
         " && docker compose up -d --build qdrant embedding-service "
-        "dscc-node-1 dscc-node-2 dscc-node-3 dscc-proxy";
+        "dscc-node-1 dscc-node-2 dscc-node-3 dscc-node-4 dscc-node-5 dscc-proxy";
     if (run_shell_command(command) != 0) {
         throw std::runtime_error("docker compose up failed");
     }
@@ -1435,8 +1453,11 @@ bool validate_conflict_pairs(const Scenario& scenario,
             return false;
         }
 
-        const int64_t finish_gap =
-            std::llabs(indexed.at(left).finish_ms - indexed.at(right).finish_ms);
+        const int64_t left_qdrant_ms =
+            indexed.at(left).response.qdrant_write_complete_unix_ms();
+        const int64_t right_qdrant_ms =
+            indexed.at(right).response.qdrant_write_complete_unix_ms();
+        const int64_t finish_gap = std::llabs(left_qdrant_ms - right_qdrant_ms);
         const int64_t minimum_gap = std::max<int64_t>(250, config.lock_hold_ms / 2);
         if (finish_gap < minimum_gap) {
             error("Conflict pair " + std::string(1, left) + "/" +
