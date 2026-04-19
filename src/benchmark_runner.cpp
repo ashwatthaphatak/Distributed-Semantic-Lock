@@ -83,7 +83,31 @@ struct Config {
     };
     bool teardown_on_exit = true;
     std::string output_path;
+    std::string run_mode = "single";
+    std::string embedding_profile = "ollama";
+    std::string matrix_output_path;
+    std::string matrix_profile_filter;  // if non-empty, only run this profile in matrix mode
+    float matrix_theta_filter = -1.0f;  // if >= 0, only run this theta in matrix mode
+    int soak_duration_min = 120;
+    int soak_snapshot_sec = 60;
+    float soak_theta = 0.75f;
+    int soak_lock_hold_ms = 500;
+    std::string soak_output_path;
 };
+
+struct EmbeddingProfile {
+    std::string name;
+    std::string model_id;
+    std::string image;
+};
+
+static const std::array<EmbeddingProfile, 3> kProfiles = {{
+    {"ollama", "all-minilm:latest",       "ollama/ollama:latest"},
+    {"bge",    "bge-m3:latest",           "ollama/ollama:latest"},
+    {"qwen",   "qwen3-embedding:0.6b",    "ollama/ollama:latest"},
+}};
+
+static const std::array<float, 3> kMatrixThetas = {0.55f, 0.75f, 0.95f};
 
 struct HttpResponse {
     int status_code = 0;
@@ -108,6 +132,7 @@ struct TemplateDocument {
     std::string source_file;
     std::string text;
     std::vector<float> embedding;
+    int64_t embedding_ms = 0;
 };
 
 enum class OperationType {
@@ -131,6 +156,9 @@ enum class ScenarioKind {
     kQueueHopping,
     kMixedStagger,
     kReadStampede,
+    kParaphraseGauntlet,
+    kCrossDomainFlood,
+    kWritePressureRatchet,
 };
 
 struct BenchmarkCase {
@@ -199,6 +227,7 @@ struct BenchmarkMetrics {
     int queue_hops_max = 0;
     double success_rate = 0.0;
     double throughput_ops_per_sec = 0.0;
+    double utilization_factor = 0.0;
     double serialization_score = 1.0;
     double distinct_parallelism_rate = 0.0;
     int64_t makespan_ms = 0;
@@ -216,11 +245,35 @@ struct BenchmarkMetrics {
     int64_t queue_hops_p95 = 0;
 };
 
+struct EmbeddingLatencyStats {
+    int sample_count = 0;
+    int64_t p50 = 0;
+    int64_t p95 = 0;
+    int64_t p99 = 0;
+};
+
+struct SoakSnapshot {
+    int64_t elapsed_sec = 0;
+    int window_ops = 0;
+    int total_ops = 0;
+    int qdrant_size = 0;
+    int64_t lock_wait_p50_ms = 0;
+    int64_t lock_wait_p95_ms = 0;
+    int64_t lock_wait_p99_ms = 0;
+    int64_t op_latency_p50_ms = 0;
+    int64_t op_latency_p95_ms = 0;
+    int64_t op_latency_p99_ms = 0;
+    int64_t qdrant_window_p95_ms = 0;
+    double blocked_rate = 0.0;
+    double throughput_ops_per_sec = 0.0;
+};
+
 struct BenchmarkCaseResult {
     BenchmarkCase spec;
     BenchmarkMetrics metrics;
     std::vector<OperationResult> operations;
     std::vector<ContainerStats> container_stats;
+    EmbeddingLatencyStats embedding_latency;
 };
 
 struct ViolationRecord {
@@ -238,6 +291,7 @@ struct TemplateCatalog {
     const TemplateDocument* concept_a = nullptr;
     const TemplateDocument* concept_b = nullptr;
     std::vector<const TemplateDocument*> all;
+    std::vector<const TemplateDocument*> concept_a_all;
 };
 
 struct TimelineLine {
@@ -417,6 +471,42 @@ Config load_config() {
                                                  config.collection_prefix);
     config.teardown_on_exit = getenv_flag("E2E_TEARDOWN", true);
     config.output_path = getenv_or_default("DSLM_BENCH_OUTPUT", "");
+    config.run_mode = getenv_or_default("DSLM_RUN_MODE", "single");
+    config.matrix_output_path = getenv_or_default("DSLM_MATRIX_OUTPUT", "");
+    {
+        const std::string v = getenv_or_default("DSLM_SOAK_DURATION_MIN", "");
+        if (!v.empty()) { config.soak_duration_min = std::stoi(v); }
+    }
+    {
+        const std::string v = getenv_or_default("DSLM_SOAK_SNAPSHOT_SEC", "");
+        if (!v.empty()) { config.soak_snapshot_sec = std::stoi(v); }
+    }
+    {
+        const std::string v = getenv_or_default("DSLM_SOAK_THETA", "");
+        if (!v.empty()) { config.soak_theta = std::stof(v); }
+    }
+    {
+        const std::string v = getenv_or_default("DSLM_SOAK_LOCK_HOLD_MS", "");
+        if (!v.empty()) { config.soak_lock_hold_ms = std::stoi(v); }
+    }
+    config.soak_output_path = getenv_or_default("DSLM_SOAK_OUTPUT", "");
+    config.matrix_profile_filter = getenv_or_default("DSLM_MATRIX_PROFILE", "");
+    {
+        const std::string v = getenv_or_default("DSLM_MATRIX_THETA", "");
+        if (!v.empty()) { config.matrix_theta_filter = std::stof(v); }
+    }
+
+    const std::string profile_name = getenv_or_default("EMBEDDING_PROFILE", "");
+    if (!profile_name.empty()) {
+        for (const EmbeddingProfile& profile : kProfiles) {
+            if (profile.name == profile_name) {
+                config.embedding_profile = profile.name;
+                config.model_id = profile.model_id;
+                config.embedding_image = profile.image;
+                break;
+            }
+        }
+    }
     return config;
 }
 
@@ -935,7 +1025,10 @@ std::vector<TemplateDocument> load_templates(const Config& config) {
             document.template_id = "tpl-" + std::to_string(++counter);
             document.source_file = json_path.filename().string();
             document.text = payload;
+            const auto emb_start = std::chrono::steady_clock::now();
             document.embedding = request_embedding(config, document.text);
+            document.embedding_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - emb_start).count();
             templates.push_back(std::move(document));
         }
     }
@@ -987,6 +1080,9 @@ TemplateCatalog build_template_catalog(const std::vector<TemplateDocument>& temp
     catalog.all.reserve(templates.size());
     for (const TemplateDocument& document : templates) {
         catalog.all.push_back(&document);
+        if (document.source_file == "A.json") {
+            catalog.concept_a_all.push_back(&document);
+        }
     }
     catalog.concept_a = find_first_template_from_source(templates, "A.json");
     catalog.concept_b = find_first_template_from_source(templates, "D.json");
@@ -1035,7 +1131,7 @@ BenchmarkCase make_case(int index,
 
 std::vector<BenchmarkCase> build_curated_cases(const Config& config) {
     std::vector<BenchmarkCase> cases;
-    cases.reserve(10);
+    cases.reserve(13);
     cases.push_back(make_case(1,
                               ScenarioKind::kThunderingHerd,
                               "The Thundering Herd",
@@ -1155,6 +1251,42 @@ std::vector<BenchmarkCase> build_curated_cases(const Config& config) {
                               0,
                               ArrivalMode::kBurst,
                               0,
+                              config));
+    cases.push_back(make_case(11,
+                              ScenarioKind::kParaphraseGauntlet,
+                              "The Paraphrase Gauntlet",
+                              "Test whether each model reliably detects paraphrase overlap; weak models risk violations.",
+                              10,
+                              10,
+                              0,
+                              0.75f,
+                              750,
+                              ArrivalMode::kBurst,
+                              0,
+                              config));
+    cases.push_back(make_case(12,
+                              ScenarioKind::kCrossDomainFlood,
+                              "The Cross-Domain Flood",
+                              "Verify distinct domains run in parallel; weak models cause unnecessary cross-domain blocking.",
+                              12,
+                              12,
+                              0,
+                              0.75f,
+                              500,
+                              ArrivalMode::kBurst,
+                              0,
+                              config));
+    cases.push_back(make_case(13,
+                              ScenarioKind::kWritePressureRatchet,
+                              "The Write Pressure Ratchet",
+                              "Measure read fairness under sustained write load; consistent models produce predictable read latency.",
+                              16,
+                              4,
+                              12,
+                              0.75f,
+                              800,
+                              ArrivalMode::kStaggered,
+                              30,
                               config));
     return cases;
 }
@@ -1360,6 +1492,56 @@ std::vector<BenchmarkOperation> build_workload(const BenchmarkCase& spec,
                     make_operation_from_template(*catalog.concept_a,
                                                  next_agent_id(role_counters, "sustainability_agent"),
                                                  OperationType::kRead,
+                                                 offset_for(spec, i)));
+            }
+            break;
+        }
+        case ScenarioKind::kParaphraseGauntlet: {
+            // Cycle through all paraphrase variants of concept_a (A.json payload_schedule).
+            // Each op is a different phrasing of the same sustainability concept, so every
+            // model should detect overlap — weaker models may fail at the paraphrase boundary.
+            const size_t variant_count = catalog.concept_a_all.empty()
+                ? 1
+                : catalog.concept_a_all.size();
+            for (int i = 0; i < spec.agent_count; ++i) {
+                const TemplateDocument& tmpl = catalog.concept_a_all.empty()
+                    ? *catalog.concept_a
+                    : *catalog.concept_a_all[static_cast<size_t>(i) % variant_count];
+                workload.push_back(
+                    make_operation_from_template(tmpl,
+                                                 next_agent_id(role_counters, "paraphrase_agent"),
+                                                 OperationType::kWrite,
+                                                 offset_for(spec, i)));
+            }
+            break;
+        }
+        case ScenarioKind::kCrossDomainFlood: {
+            // First half on concept_a (sustainability design), second half on concept_b
+            // (payroll/financial).  These domains should have near-zero semantic similarity;
+            // false-positive blocking indicates the model is under-discriminating.
+            const int half = spec.agent_count / 2;
+            for (int i = 0; i < spec.agent_count; ++i) {
+                const TemplateDocument& tmpl = (i < half) ? *catalog.concept_a : *catalog.concept_b;
+                workload.push_back(
+                    make_operation_from_template(tmpl,
+                                                 next_agent_id(role_counters,
+                                                               role_prefix_for_source_file(tmpl.source_file)),
+                                                 OperationType::kWrite,
+                                                 offset_for(spec, i)));
+            }
+            break;
+        }
+        case ScenarioKind::kWritePressureRatchet: {
+            // 4 writers + many readers, all on concept_a, staggered arrivals.
+            // Tests whether readers receive fair, consistent service under write pressure.
+            // Positions 0, 4, 8, 12 are writers; the rest are readers.
+            for (int i = 0; i < spec.agent_count; ++i) {
+                const bool is_write = (i % 4 == 0);
+                workload.push_back(
+                    make_operation_from_template(*catalog.concept_a,
+                                                 next_agent_id(role_counters, "pressure_agent"),
+                                                 is_write ? OperationType::kWrite
+                                                          : OperationType::kRead,
                                                  offset_for(spec, i)));
             }
             break;
@@ -1619,6 +1801,18 @@ BenchmarkMetrics compute_metrics(const BenchmarkCase& spec,
             ? 0.0
             : (static_cast<double>(metrics.total_ops) * 1000.0) /
                   static_cast<double>(metrics.makespan_ms);
+    {
+        double sum_elapsed = 0.0;
+        for (const int64_t v : latencies) {
+            sum_elapsed += static_cast<double>(v);
+        }
+        const double mean_elapsed = latencies.empty()
+            ? 0.0
+            : sum_elapsed / static_cast<double>(latencies.size());
+        metrics.utilization_factor = metrics.makespan_ms > 0
+            ? mean_elapsed / static_cast<double>(metrics.makespan_ms)
+            : 0.0;
+    }
     metrics.serialization_score =
         metrics.expected_conflict_pairs == 0
             ? 1.0
@@ -1822,13 +2016,24 @@ void write_template_catalog_json(std::ostream& out,
 }
 
 void write_case_json(std::ostream& out,
-                     const BenchmarkCaseResult& result) {
+                     const BenchmarkCaseResult& result,
+                     const std::string& run_mode = "single",
+                     const std::string& embedding_profile = "",
+                     const std::string& model_id = "",
+                     const std::string& embedding_image = "") {
     const std::vector<ViolationRecord> violations =
         compute_violation_records(result.spec, result.operations);
     out << "    {\n";
     out << "      \"case_index\": " << result.spec.case_index << ",\n";
     out << "      \"name\": \"" << escape_json(result.spec.name) << "\",\n";
     out << "      \"target\": \"" << escape_json(result.spec.target) << "\",\n";
+    if (!run_mode.empty() && run_mode != "single") {
+        out << "      \"run_mode\": \"" << escape_json(run_mode) << "\",\n";
+        out << "      \"embedding_profile\": \"" << escape_json(embedding_profile) << "\",\n";
+        out << "      \"embedding_provider\": \"ollama\",\n";
+        out << "      \"embedding_image\": \"" << escape_json(embedding_image) << "\",\n";
+        out << "      \"model_id\": \"" << escape_json(model_id) << "\",\n";
+    }
     out << "      \"node_count\": " << result.spec.node_count << ",\n";
     out << "      \"agent_count\": " << result.spec.agent_count << ",\n";
     out << "      \"write_count\": " << result.spec.write_count << ",\n";
@@ -1840,6 +2045,14 @@ void write_case_json(std::ostream& out,
         << "\",\n";
     out << "      \"arrival_gap_ms\": " << result.spec.arrival_gap_ms << ",\n";
     out << "      \"collection_name\": \"" << escape_json(result.spec.collection_name) << "\",\n";
+    if (result.embedding_latency.sample_count > 0) {
+        out << "      \"embedding_latency_ms\": {"
+            << "\"sample_count\":" << result.embedding_latency.sample_count
+            << ",\"p50\":" << result.embedding_latency.p50
+            << ",\"p95\":" << result.embedding_latency.p95
+            << ",\"p99\":" << result.embedding_latency.p99
+            << "},\n";
+    }
     out << "      \"metrics\": {\n";
     const BenchmarkMetrics& m = result.metrics;
     out << "        \"total_ops\": " << m.total_ops << ",\n";
@@ -1862,6 +2075,7 @@ void write_case_json(std::ostream& out,
     out << "        \"queue_hops_max\": " << m.queue_hops_max << ",\n";
     out << "        \"success_rate\": " << std::fixed << std::setprecision(6) << m.success_rate << ",\n";
     out << "        \"throughput_ops_per_sec\": " << m.throughput_ops_per_sec << ",\n";
+    out << "        \"utilization_factor\": " << m.utilization_factor << ",\n";
     out << "        \"serialization_score\": " << m.serialization_score << ",\n";
     out << "        \"distinct_parallelism_rate\": " << m.distinct_parallelism_rate << ",\n";
     out << "        \"makespan_ms\": " << m.makespan_ms << ",\n";
@@ -2250,7 +2464,11 @@ public:
                        const Config& config,
                        const std::vector<TemplateDocument>& templates,
                        size_t planned_cases)
-        : path_(path) {
+        : path_(path),
+          run_mode_(config.run_mode),
+          embedding_profile_(config.embedding_profile),
+          model_id_(config.model_id),
+          embedding_image_(config.embedding_image) {
         const fs::path file_path(path_);
         if (!file_path.parent_path().empty()) {
             fs::create_directories(file_path.parent_path());
@@ -2269,7 +2487,11 @@ public:
         out_ << "{\n";
         out_ << "  \"run_started_unix_s\": " << unix_seconds << ",\n";
         out_ << "  \"project_root\": \"" << escape_json(config.project_root) << "\",\n";
-        out_ << "  \"model_id\": \"" << escape_json(config.model_id) << "\",\n";
+        if (run_mode_ != "single") {
+            out_ << "  \"run_mode\": \"" << escape_json(run_mode_) << "\",\n";
+            out_ << "  \"embedding_profile\": \"" << escape_json(embedding_profile_) << "\",\n";
+        }
+        out_ << "  \"model_id\": \"" << escape_json(model_id_) << "\",\n";
         out_ << "  \"planned_case_count\": " << planned_cases << ",\n";
         out_ << "  \"template_count\": " << templates.size() << ",\n";
         write_template_catalog_json(out_, templates);
@@ -2291,7 +2513,7 @@ public:
         if (!first_case_) {
             out_ << ",\n";
         }
-        write_case_json(out_, result);
+        write_case_json(out_, result, run_mode_, embedding_profile_, model_id_, embedding_image_);
         out_.flush();
         first_case_ = false;
         print_case_terminal_report(result, fs::path(path_).filename().string());
@@ -2314,66 +2536,513 @@ public:
 private:
     std::string path_;
     std::ofstream out_;
+    std::string run_mode_;
+    std::string embedding_profile_;
+    std::string model_id_;
+    std::string embedding_image_;
     bool first_case_ = true;
     bool finalized_ = false;
 };
 
+EmbeddingLatencyStats compute_embedding_stats(const std::vector<TemplateDocument>& templates) {
+    std::vector<int64_t> times;
+    times.reserve(templates.size());
+    for (const TemplateDocument& t : templates) {
+        if (t.embedding_ms > 0) {
+            times.push_back(t.embedding_ms);
+        }
+    }
+    EmbeddingLatencyStats stats;
+    stats.sample_count = static_cast<int>(times.size());
+    stats.p50 = percentile_ms(times, 0.50);
+    stats.p95 = percentile_ms(times, 0.95);
+    stats.p99 = percentile_ms(times, 0.99);
+    return stats;
+}
+
+std::string default_matrix_run_path(const Config& config,
+                                    const std::string& profile,
+                                    float theta) {
+    const auto now = std::chrono::system_clock::now();
+    const auto unix_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                                  now.time_since_epoch())
+                                  .count();
+    std::ostringstream name;
+    name << "benchmark_run_" << unix_seconds
+         << "_" << profile
+         << "_" << std::fixed << std::setprecision(2) << theta
+         << ".json";
+    return (fs::path(config.project_root) / "logs" / name.str()).string();
+}
+
+std::string default_matrix_csv_path(const Config& config) {
+    const auto now = std::chrono::system_clock::now();
+    const auto unix_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                                  now.time_since_epoch())
+                                  .count();
+    return (fs::path(config.project_root) / "logs" /
+            ("benchmark_run_" + std::to_string(unix_seconds) + "_matrix.csv"))
+        .string();
+}
+
+class MatrixCsvAppender {
+public:
+    explicit MatrixCsvAppender(const std::string& path) : path_(path) {
+        const fs::path file_path(path_);
+        if (!file_path.parent_path().empty()) {
+            fs::create_directories(file_path.parent_path());
+        }
+        const bool exists = fs::exists(file_path);
+        out_.open(path_, std::ios::out | std::ios::app);
+        if (!out_) {
+            fail("could not open matrix CSV path " + path_);
+        }
+        if (!exists) {
+            out_ << "profile,model_id,theta,scenario,total_ops,write_ops,read_ops,"
+                    "throughput_ops_per_sec,utilization_factor,latency_p50_ms,latency_p95_ms,"
+                    "latency_p99_ms,write_latency_p95_ms,read_latency_p95_ms,lock_wait_p50_ms,"
+                    "lock_wait_p95_ms,lock_wait_p99_ms,qdrant_window_p95_ms,blocked_rate,"
+                    "blocked_ops,conflicting_overlap_violations,serialization_score,"
+                    "distinct_parallelism_rate,embedding_p50_ms,embedding_p95_ms,embedding_p99_ms\n";
+        }
+    }
+
+    void append(const BenchmarkCaseResult& result,
+                const Config& config,
+                const EmbeddingLatencyStats& emb) {
+        const BenchmarkMetrics& m = result.metrics;
+        const double blocked_rate = m.total_ops > 0
+            ? static_cast<double>(m.blocked_ops) / static_cast<double>(m.total_ops)
+            : 0.0;
+        out_ << config.embedding_profile << ","
+             << config.model_id << ","
+             << std::fixed << std::setprecision(3) << result.spec.theta << ","
+             << result.spec.name << ","
+             << m.total_ops << ","
+             << m.write_ops << ","
+             << m.read_ops << ","
+             << std::setprecision(6) << m.throughput_ops_per_sec << ","
+             << m.utilization_factor << ","
+             << m.latency_p50_ms << ","
+             << m.latency_p95_ms << ","
+             << m.latency_p99_ms << ","
+             << m.write_latency_p95_ms << ","
+             << m.read_latency_p95_ms << ","
+             << m.lock_wait_p50_ms << ","
+             << m.lock_wait_p95_ms << ","
+             << m.lock_wait_p99_ms << ","
+             << m.qdrant_window_p95_ms << ","
+             << blocked_rate << ","
+             << m.blocked_ops << ","
+             << m.conflicting_overlap_violations << ","
+             << m.serialization_score << ","
+             << m.distinct_parallelism_rate << ","
+             << emb.p50 << ","
+             << emb.p95 << ","
+             << emb.p99 << "\n";
+        out_.flush();
+    }
+
+    const std::string& path() const { return path_; }
+
+private:
+    std::string path_;
+    std::ofstream out_;
+};
+
+std::string default_soak_csv_path(const Config& config) {
+    const auto now = std::chrono::system_clock::now();
+    const auto unix_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                                  now.time_since_epoch())
+                                  .count();
+    return (fs::path(config.project_root) / "logs" /
+            ("soak_run_" + std::to_string(unix_seconds) + ".csv"))
+        .string();
+}
+
+class SoakCsvWriter {
+public:
+    explicit SoakCsvWriter(const std::string& path) : path_(path) {
+        const fs::path file_path(path_);
+        if (!file_path.parent_path().empty()) {
+            fs::create_directories(file_path.parent_path());
+        }
+        out_.open(path_, std::ios::out | std::ios::trunc);
+        if (!out_) {
+            fail("could not open soak CSV path " + path_);
+        }
+        out_ << "elapsed_sec,window_ops,total_ops,qdrant_size,"
+                "lock_wait_p50_ms,lock_wait_p95_ms,lock_wait_p99_ms,"
+                "op_latency_p50_ms,op_latency_p95_ms,op_latency_p99_ms,"
+                "qdrant_window_p95_ms,blocked_rate,throughput_ops_per_sec\n";
+    }
+
+    void append(const SoakSnapshot& s) {
+        out_ << s.elapsed_sec << ","
+             << s.window_ops << ","
+             << s.total_ops << ","
+             << s.qdrant_size << ","
+             << s.lock_wait_p50_ms << ","
+             << s.lock_wait_p95_ms << ","
+             << s.lock_wait_p99_ms << ","
+             << s.op_latency_p50_ms << ","
+             << s.op_latency_p95_ms << ","
+             << s.op_latency_p99_ms << ","
+             << s.qdrant_window_p95_ms << ","
+             << std::fixed << std::setprecision(4) << s.blocked_rate << ","
+             << std::setprecision(4) << s.throughput_ops_per_sec << "\n";
+        out_.flush();
+    }
+
+    const std::string& path() const { return path_; }
+
+private:
+    std::string path_;
+    std::ofstream out_;
+};
+
 }  // namespace
+
+// Runs one pass of all cases. In matrix mode, theta_override >= 0 replaces every
+// case's theta; pass -1.0f to keep each case's own theta (single mode).
+static void run_pass(Config& config,
+                     const std::vector<BenchmarkCase>& base_cases,
+                     float theta_override,
+                     BenchmarkRunLogger& logger,
+                     MatrixCsvAppender* csv,
+                     bool& stack_started) {
+    std::vector<BenchmarkCase> cases = base_cases;
+    if (theta_override >= 0.0f) {
+        for (BenchmarkCase& spec : cases) {
+            spec.theta = theta_override;
+        }
+    }
+
+    // Bring up stack for template loading with the current model config.
+    start_stack_for_case(config, cases.front());
+    stack_started = true;
+    const std::vector<TemplateDocument> templates = load_templates(config);
+    const TemplateCatalog catalog = build_template_catalog(templates);
+    info("loaded template corpus size: " + std::to_string(templates.size()));
+    stop_stack(config);
+    stack_started = false;
+
+    const EmbeddingLatencyStats emb_stats = compute_embedding_stats(templates);
+
+    LiveQueueMonitor queue_monitor(config);
+
+    for (const BenchmarkCase& spec : cases) {
+        start_stack_for_case(config, spec);
+        stack_started = true;
+
+        const std::vector<BenchmarkOperation> workload = build_workload(spec, catalog);
+        queue_monitor.start(spec);
+        const std::vector<OperationResult> operations = run_case_traffic(config, spec, workload);
+        queue_monitor.stop();
+        std::cout << "\n";
+
+        std::vector<std::string> active_services = {"qdrant", "embedding-service", "dscc-proxy"};
+        for (int i = 0; i < spec.node_count; ++i) {
+            active_services.push_back(config.node_service_names[static_cast<size_t>(i)]);
+        }
+
+        BenchmarkCaseResult result;
+        result.spec = spec;
+        result.operations = operations;
+        result.metrics = compute_metrics(spec, operations);
+        result.container_stats = collect_container_stats(active_services, config);
+        result.embedding_latency = emb_stats;
+        logger.append_case(result);
+        if (csv != nullptr) {
+            csv->append(result, config, emb_stats);
+        }
+
+        if (config.teardown_on_exit) {
+            stop_stack(config);
+            stack_started = false;
+        }
+    }
+}
+
+// Fires one burst round of soak ops on an already-running stack.
+// Does NOT reset or re-create the Qdrant collection.
+static std::vector<OperationResult> fire_soak_round(
+        const Config& config,
+        const std::string& collection_name,
+        const TemplateCatalog& catalog,
+        int round) {
+    // Per-round workload:
+    //   2 × concept_a writes  (will serialise with each other)
+    //   1 × concept_a read    (may queue behind the writes)
+    //   1 × concept_b write   (distinct domain, always free)
+    //   1 × concept_b read    (distinct domain read)
+    const std::string round_s = std::to_string(round);
+    std::vector<BenchmarkOperation> ops = {
+        { "soak_a_w1_" + round_s, "sustainability_agent",
+          catalog.concept_a->template_id, catalog.concept_a->text,
+          catalog.concept_a->embedding, OperationType::kWrite, 0 },
+        { "soak_a_w2_" + round_s, "sustainability_agent",
+          catalog.concept_a->template_id, catalog.concept_a->text,
+          catalog.concept_a->embedding, OperationType::kWrite, 0 },
+        { "soak_a_r1_" + round_s, "sustainability_agent",
+          catalog.concept_a->template_id, catalog.concept_a->text,
+          catalog.concept_a->embedding, OperationType::kRead, 0 },
+        { "soak_b_w1_" + round_s, "construction_agent",
+          catalog.concept_b->template_id, catalog.concept_b->text,
+          catalog.concept_b->embedding, OperationType::kWrite, 0 },
+        { "soak_b_r1_" + round_s, "construction_agent",
+          catalog.concept_b->template_id, catalog.concept_b->text,
+          catalog.concept_b->embedding, OperationType::kRead, 0 },
+    };
+
+    auto channel = grpc::CreateChannel(config.dscc_target,
+                                       grpc::InsecureChannelCredentials());
+    const auto start = SteadyClock::now();
+    const int64_t unix_base_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
+
+    std::vector<OperationResult> results(ops.size());
+    std::vector<std::thread> threads;
+    threads.reserve(ops.size());
+
+    for (size_t i = 0; i < ops.size(); ++i) {
+        threads.emplace_back([&, i]() {
+            auto stub = dscc::LockService::NewStub(channel);
+            results[i].operation = ops[i];
+            results[i].submit_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                SteadyClock::now() - start).count();
+
+            dscc::AcquireRequest req;
+            req.set_agent_id(ops[i].agent_id);
+            req.set_payload_text(ops[i].text);
+            req.set_source_file(ops[i].template_id);
+            req.set_timestamp_unix_ms(unix_base_ms);
+            req.set_operation_type(to_proto_operation(ops[i].operation));
+            for (float v : ops[i].embedding) { req.add_embedding(v); }
+
+            grpc::ClientContext ctx;
+            results[i].dslm_enter_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                SteadyClock::now() - start).count();
+            results[i].status = stub->AcquireGuard(&ctx, req, &results[i].response);
+            results[i].dslm_exit_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                SteadyClock::now() - start).count();
+            results[i].finish_ms = results[i].dslm_exit_ms;
+            results[i].elapsed_ms = results[i].finish_ms - results[i].submit_ms;
+        });
+    }
+    for (auto& t : threads) { t.join(); }
+    return results;
+}
+
+// Computes a soak snapshot from the accumulated window vectors.
+static SoakSnapshot make_soak_snapshot(
+        int64_t elapsed_sec,
+        int total_ops,
+        int qdrant_sz,
+        const std::vector<int64_t>& window_waits,
+        const std::vector<int64_t>& window_latencies,
+        const std::vector<int64_t>& window_qdrant,
+        int window_blocked,
+        const SteadyClock::time_point& window_start) {
+    SoakSnapshot snap;
+    snap.elapsed_sec = elapsed_sec;
+    snap.window_ops = static_cast<int>(window_latencies.size());
+    snap.total_ops = total_ops;
+    snap.qdrant_size = qdrant_sz;
+    snap.lock_wait_p50_ms = percentile_ms(window_waits, 0.50);
+    snap.lock_wait_p95_ms = percentile_ms(window_waits, 0.95);
+    snap.lock_wait_p99_ms = percentile_ms(window_waits, 0.99);
+    snap.op_latency_p50_ms = percentile_ms(window_latencies, 0.50);
+    snap.op_latency_p95_ms = percentile_ms(window_latencies, 0.95);
+    snap.op_latency_p99_ms = percentile_ms(window_latencies, 0.99);
+    snap.qdrant_window_p95_ms = percentile_ms(window_qdrant, 0.95);
+    snap.blocked_rate = snap.window_ops > 0
+        ? static_cast<double>(window_blocked) / static_cast<double>(snap.window_ops)
+        : 0.0;
+    const int64_t window_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        SteadyClock::now() - window_start).count();
+    snap.throughput_ops_per_sec = window_ms > 0
+        ? (static_cast<double>(snap.window_ops) * 1000.0) / static_cast<double>(window_ms)
+        : 0.0;
+    return snap;
+}
+
+static void run_soak(Config& config, bool& stack_started) {
+    const std::string collection = config.collection_prefix + "_soak";
+
+    // Reuse the first case's stack config just to bring up services.
+    BenchmarkCase soak_spec;
+    soak_spec.case_index = 0;
+    soak_spec.name = "soak";
+    soak_spec.node_count = 5;
+    soak_spec.theta = config.soak_theta;
+    soak_spec.lock_hold_ms = config.soak_lock_hold_ms;
+    soak_spec.agent_count = 5;
+    soak_spec.write_count = 3;
+    soak_spec.read_count = 2;
+    soak_spec.collection_name = collection;
+
+    info("soak: duration=" + std::to_string(config.soak_duration_min) + "min"
+         + "  snapshot_interval=" + std::to_string(config.soak_snapshot_sec) + "s"
+         + "  theta=" + std::to_string(config.soak_theta)
+         + "  lock_hold=" + std::to_string(config.soak_lock_hold_ms) + "ms");
+
+    start_stack_for_case(config, soak_spec);
+    stack_started = true;
+
+    const std::vector<TemplateDocument> templates = load_templates(config);
+    const TemplateCatalog catalog = build_template_catalog(templates);
+    info("soak: templates loaded (" + std::to_string(templates.size()) + ")");
+
+    // Create collection once — never reset between rounds.
+    create_qdrant_collection(config, collection, templates.front().embedding.size());
+    info("soak: Qdrant collection '" + collection + "' created");
+
+    const std::string csv_path = config.soak_output_path.empty()
+        ? default_soak_csv_path(config)
+        : config.soak_output_path;
+    SoakCsvWriter csv(csv_path);
+    info("soak: CSV → " + csv_path);
+
+    const auto run_start = SteadyClock::now();
+    const auto deadline = run_start + std::chrono::minutes(config.soak_duration_min);
+
+    auto next_snapshot_at = run_start + std::chrono::seconds(config.soak_snapshot_sec);
+    auto window_start = run_start;
+
+    std::vector<int64_t> window_waits;
+    std::vector<int64_t> window_latencies;
+    std::vector<int64_t> window_qdrant;
+    int window_blocked = 0;
+    int total_ops = 0;
+    int round = 0;
+
+    auto flush_snapshot = [&]() {
+        const int64_t elapsed_sec = std::chrono::duration_cast<std::chrono::seconds>(
+            SteadyClock::now() - run_start).count();
+        const int qdrant_sz = qdrant_point_count(config, collection);
+        const SoakSnapshot snap = make_soak_snapshot(
+            elapsed_sec, total_ops, qdrant_sz,
+            window_waits, window_latencies, window_qdrant,
+            window_blocked, window_start);
+        csv.append(snap);
+
+        std::ostringstream msg;
+        msg << "soak snapshot  t=" << elapsed_sec << "s"
+            << "  ops=" << snap.window_ops << " (total=" << total_ops << ")"
+            << "  qdrant=" << qdrant_sz
+            << "  lock_wait_p95=" << snap.lock_wait_p95_ms << "ms"
+            << "  latency_p95=" << snap.op_latency_p95_ms << "ms"
+            << "  qdrant_win_p95=" << snap.qdrant_window_p95_ms << "ms"
+            << "  blocked=" << std::fixed << std::setprecision(1)
+            << (snap.blocked_rate * 100.0) << "%";
+        info(msg.str());
+
+        window_waits.clear();
+        window_latencies.clear();
+        window_qdrant.clear();
+        window_blocked = 0;
+        window_start = SteadyClock::now();
+    };
+
+    while (SteadyClock::now() < deadline) {
+        ++round;
+        const std::vector<OperationResult> round_results =
+            fire_soak_round(config, collection, catalog, round);
+
+        for (const OperationResult& r : round_results) {
+            if (!r.status.ok()) { continue; }
+            ++total_ops;
+            window_latencies.push_back(r.elapsed_ms);
+            window_waits.push_back(r.response.lock_wait_ms());
+            window_qdrant.push_back(
+                std::max<int64_t>(0,
+                    r.response.qdrant_write_complete_unix_ms() -
+                    r.response.lock_acquired_unix_ms()));
+            if (r.response.lock_wait_ms() > 0) { ++window_blocked; }
+        }
+
+        if (SteadyClock::now() >= next_snapshot_at) {
+            flush_snapshot();
+            next_snapshot_at += std::chrono::seconds(config.soak_snapshot_sec);
+        }
+
+        // Pace rounds — a brief gap lets the lock table clear between bursts.
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+
+    // Final snapshot for any remaining window ops.
+    if (!window_latencies.empty()) {
+        flush_snapshot();
+    }
+
+    info("soak: finished  total_ops=" + std::to_string(total_ops)
+         + "  rounds=" + std::to_string(round));
+    info("soak: CSV written to " + csv_path);
+}
 
 int main() {
     Config config;
     bool stack_started = false;
     try {
         config = load_config();
-        const std::vector<BenchmarkCase> cases = build_curated_cases(config);
-        if (cases.empty()) {
+
+        if (config.run_mode == "soak") {
+            run_soak(config, stack_started);
+            if (config.teardown_on_exit) { stop_stack(config); }
+            return 0;
+        }
+
+        const std::vector<BenchmarkCase> base_cases = build_curated_cases(config);
+        if (base_cases.empty()) {
             fail("curated benchmark list was empty");
         }
+        info("curated benchmark cases: " + std::to_string(base_cases.size()));
 
-        info("curated benchmark cases: " + std::to_string(cases.size()));
-        start_stack_for_case(config, cases.front());
-        stack_started = true;
+        if (config.run_mode == "matrix") {
+            // 3 profiles × 3 thetas; all case results land in one shared CSV.
+            const std::string csv_path = config.matrix_output_path.empty()
+                ? default_matrix_csv_path(config)
+                : config.matrix_output_path;
+            MatrixCsvAppender csv(csv_path);
+            info("matrix CSV: " + csv_path);
 
-        const std::vector<TemplateDocument> templates = load_templates(config);
-        const TemplateCatalog catalog = build_template_catalog(templates);
-        info("loaded template corpus size: " + std::to_string(templates.size()));
+            for (const EmbeddingProfile& profile : kProfiles) {
+                if (!config.matrix_profile_filter.empty() &&
+                    profile.name != config.matrix_profile_filter) {
+                    continue;
+                }
+                config.embedding_profile = profile.name;
+                config.model_id = profile.model_id;
+                config.embedding_image = profile.image;
+                info("matrix profile: " + profile.name + " (" + profile.model_id + ")");
 
-        stop_stack(config);
-        stack_started = false;
-
-        const std::string output_path =
-            config.output_path.empty() ? default_output_path(config) : config.output_path;
-        BenchmarkRunLogger logger(output_path, config, templates, cases.size());
-        LiveQueueMonitor queue_monitor(config);
-
-        for (const BenchmarkCase& spec : cases) {
-            start_stack_for_case(config, spec);
-            stack_started = true;
-
-            const std::vector<BenchmarkOperation> workload = build_workload(spec, catalog);
-            queue_monitor.start(spec);
-            const std::vector<OperationResult> operations = run_case_traffic(config, spec, workload);
-            queue_monitor.stop();
-            std::cout << "\n";
-
-            std::vector<std::string> active_services = {"qdrant", "embedding-service", "dscc-proxy"};
-            for (int i = 0; i < spec.node_count; ++i) {
-                active_services.push_back(config.node_service_names[static_cast<size_t>(i)]);
+                for (float theta : kMatrixThetas) {
+                    if (config.matrix_theta_filter >= 0.0f &&
+                        std::abs(theta - config.matrix_theta_filter) > 0.001f) {
+                        continue;
+                    }
+                    info("matrix theta: " + std::to_string(theta));
+                    const std::string run_path =
+                        default_matrix_run_path(config, profile.name, theta);
+                    BenchmarkRunLogger logger(run_path, config, {}, base_cases.size());
+                    run_pass(config, base_cases, theta, logger, &csv, stack_started);
+                    logger.finalize();
+                    info("matrix run written to " + logger.path());
+                }
             }
 
-            BenchmarkCaseResult result;
-            result.spec = spec;
-            result.operations = operations;
-            result.metrics = compute_metrics(spec, operations);
-            result.container_stats = collect_container_stats(active_services, config);
-            logger.append_case(result);
-
-            if (config.teardown_on_exit) {
-                stop_stack(config);
-                stack_started = false;
-            }
+            info("matrix CSV written to " + csv.path());
+            return 0;
         }
 
+        // Single mode — each case uses its own theta from build_curated_cases.
+        const std::string output_path =
+            config.output_path.empty() ? default_output_path(config) : config.output_path;
+        BenchmarkRunLogger logger(output_path, config, {}, base_cases.size());
+        run_pass(config, base_cases, -1.0f, logger, nullptr, stack_started);
         logger.finalize();
         info("raw benchmark log written to " + logger.path());
 

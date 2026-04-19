@@ -27,8 +27,12 @@ It now includes:
 - a leader-aware proxy in front of the node cluster
 - a queueing semantic lock table with requeue and hop tracking
 - both `write` and `read` operations through the same semantic admission path
-- an end-to-end demo harness
-- a curated 10-scenario benchmark runner with live queue-event output and raw JSON logging
+- an end-to-end demo harness (`dscc-e2e-bench`)
+- a curated benchmark runner (`dscc-benchmark`) with three modes:
+  - **single** — 13 scenarios in sequence, each with its own per-case theta
+  - **matrix** — 3 embedding models × 3 thetas × 13 scenarios (117 case runs), outputs a shared CSV
+  - **soak** — continuous insertion for a configurable duration (default 2 hours), windowed latency snapshots every 60 s to measure latency stability as Qdrant collection grows
+- an embedding model evaluation across `all-minilm:latest`, `bge-m3:latest`, and `qwen3-embedding:0.6b` (see `MODEL_FINDINGS.md`)
 
 At the same time, the system is still a research prototype.
 Some benchmark scenarios still report correctness violations, so the repo should be treated as operational but not yet behaviorally closed.
@@ -431,8 +435,9 @@ Purpose:
 - per-case timeline output
 - per-case results summary
 - raw JSON log generation
+- matrix and soak experiment modes
 
-Current scenario set:
+Current scenario set (13 cases):
 
 1. The Thundering Herd
 2. The Semantic Interleaving
@@ -444,24 +449,39 @@ Current scenario set:
 8. Queue Hopping
 9. The Mixed Stagger
 10. The 100% Read Stampede
+11. The Paraphrase Gauntlet — correctness under paraphrase: does the model detect near-duplicate phrasing?
+12. The Cross-Domain Flood — specificity: does the model incorrectly block unrelated domains?
+13. The Write Pressure Ratchet — fairness under sustained write load: are readers consistently served?
+
+Cases 11–13 are research-purpose scenarios designed to compare embedding model behaviour.
+Results and metric definitions are in `MODEL_FINDINGS.md`.
 
 ### 10.4 Current benchmark outputs
 
-The runner currently emits two outputs:
+**Single mode** emits two outputs:
 
-1. terminal output
-   - live queue events
-   - final timeline per case
-   - final results per case
+1. terminal output — live queue events, final timeline per case, final results per case
 
-2. raw JSON
-   - file name: `logs/benchmark_run_<timestamp>.json`
-   - includes:
-     - case metadata
-     - metrics
-     - container stats
-     - per-operation traces
-     - explicit correctness-violation records
+2. raw JSON — `logs/benchmark_run_<timestamp>.json`
+   - case metadata, metrics, container stats, per-operation traces, correctness-violation records
+
+**Matrix mode** emits:
+
+- one JSON per (model, theta) combination — `logs/benchmark_run_<ts>_<profile>_<theta>.json`
+- one shared CSV — `logs/benchmark_run_<ts>_matrix.csv`
+  - one row per (profile × theta × scenario)
+  - columns: profile, model_id, theta, scenario, total_ops, write_ops, read_ops,
+    throughput_ops_per_sec, utilization_factor, latency_p50/p95/p99_ms,
+    write/read_latency_p95_ms, lock_wait_p50/p95/p99_ms, qdrant_window_p95_ms,
+    blocked_rate, blocked_ops, conflicting_overlap_violations, serialization_score,
+    distinct_parallelism_rate, embedding_p50/p95/p99_ms
+
+**Soak mode** emits:
+
+- one time-series CSV — `logs/soak_run_<timestamp>.csv`
+  - one row per snapshot interval (default every 60 s)
+  - columns: elapsed_sec, window_ops, total_ops, qdrant_size, lock_wait_p50/p95/p99_ms,
+    op_latency_p50/p95/p99_ms, qdrant_window_p95_ms, blocked_rate, throughput_ops_per_sec
 
 ---
 
@@ -512,26 +532,49 @@ Right now the benchmark should be treated as a strong signal, not an absolute pr
 
 ## 12. Current Observed Benchmark State
 
-Based on the current curated benchmark runs:
+### 12.1 Single-mode correctness
 
-- some scenarios achieve clean behavior
-  - `The Strict Sieve`
-  - `The Ghost Client`
-  - `The Almost Collision`
-  - `The Mixed Stagger`
-- some scenarios still report correctness violations
-  - `The Thundering Herd`
-  - `The Semantic Interleaving`
-  - `The Read-Starvation Trap`
-  - `The Permissive Sieve`
-  - `Queue Hopping`
-  - `The 100% Read Stampede`
+Some scenarios achieve clean behaviour across all runs:
+- `The Strict Sieve`, `The Ghost Client`, `The Almost Collision`, `The Mixed Stagger`
 
-What this implies:
+Some scenarios still report occasional correctness violations:
+- `The Thundering Herd`, `The Semantic Interleaving`, `The Read-Starvation Trap`,
+  `The Permissive Sieve`, `Queue Hopping`, `The 100% Read Stampede`
 
-- the lock table and benchmark infrastructure are active and meaningful
-- the system can clearly demonstrate queueing, requeueing, and allowed parallelism
-- the correctness story is not yet fully settled
+The lock table and benchmark infrastructure are active and meaningful. The correctness
+story for the existing 10 scenarios is not yet fully settled.
+
+### 12.2 Embedding model evaluation (matrix mode)
+
+A full 3 × 3 × 13 matrix sweep was completed comparing `all-minilm:latest` (ollama),
+`bge-m3:latest` (bge), and `qwen3-embedding:0.6b` (qwen) at θ ∈ {0.55, 0.75, 0.95}.
+
+Key findings (full metric definitions and tables in `MODEL_FINDINGS.md`):
+
+- **`all-minilm` structurally fails paraphrase detection.** On the Paraphrase Gauntlet
+  its serialisation score never exceeds 0.833 at any theta. At θ=0.75 it allows 6 out of
+  12 conflict pairs to run concurrently. No threshold tuning fixes this — the model
+  lacks the semantic resolution to distinguish paraphrases from distinct payloads.
+
+- **`qwen3-embedding:0.6b` at θ=0.75 is the recommended operating point.** It is the
+  only (model, θ) combination that achieves a perfect serialisation score (1.000) on the
+  Paraphrase Gauntlet with zero violations, while also avoiding false-positive cross-domain
+  blocking (Case 12 converges to the same latency as `all-minilm` at θ=0.75).
+
+- **Reader–writer fairness is model-agnostic.** Case 13 (Write Pressure Ratchet) shows
+  write and read P95 latencies within 60 ms of each other across all nine (model, θ)
+  combinations. The DSLM lock table enforces this at the architecture level.
+
+- **Embedding overhead:** `all-minilm` p50 ≈ 10 ms; `bge`/`qwen` p50 ≈ 111–133 ms.
+  The ~11× difference is a fixed per-operation cost; it does not scale with concurrency.
+
+### 12.3 Soak mode
+
+The soak test is implemented and ready to run (`DSLM_RUN_MODE=soak`). It has not yet
+been run for a full 2-hour session. The experiment will validate whether lock-wait
+latency stays flat as the Qdrant collection grows — the expected result is that
+serialisation overhead (in-memory) is DB-size-independent, while Qdrant upsert window
+may grow marginally at high collection sizes.
 
 ---
 
@@ -556,26 +599,36 @@ If you are changing system behavior, these are the most important files:
 
 ---
 
-## 14. Current Bottom Line
+## 14. Key Documents
+
+| Document | Purpose |
+|---|---|
+| `README.md` | Build commands, run commands for all three benchmark modes, plotting instructions |
+| `STATE.md` | This file — authoritative current-state description |
+| `CURRENT_SYSTEM.md` | Deep-dive architecture reference (mostly stable; note the historical caveat at the top) |
+| `MODEL_FINDINGS.md` | Embedding model evaluation results from the matrix sweep — metric definitions, per-case tables, recommendation |
+
+---
+
+## 15. Current Bottom Line
 
 The repository is currently in this state:
 
-- distributed runtime exists
-- proxy exists
-- Raft exists
-- semantic queueing exists
+- distributed runtime exists (Raft, proxy, 5-node cluster)
+- semantic queueing exists (per-lock waiter queues, requeue, hop tracking)
 - read and write paths both exist
-- curated benchmarks exist
-- live queue visibility exists
-- explicit violation markers now exist
+- three benchmark modes exist: single, matrix, soak
+- embedding model evaluation is complete: `qwen3-embedding:0.6b` at θ=0.75 recommended
+- live queue visibility and explicit violation markers exist
 
 But:
 
-- benchmark correctness is not yet clean across all stress cases
+- benchmark correctness is not yet clean across all 10 original stress scenarios
 - local-before-commit admission is still a major architectural caveat
 - active lock state is still in-memory and non-durable
+- soak test (2-hour DB growth experiment) has not yet been run to completion
 
 So the repo should be treated as:
 
-- a functioning distributed research prototype
+- a functioning distributed research prototype with a completed embedding model study
 - not yet a fully closed or production-ready distributed lock system

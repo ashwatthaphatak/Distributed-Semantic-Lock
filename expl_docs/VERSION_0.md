@@ -3,7 +3,9 @@
 > Historical note:
 > this document reflects an earlier architecture snapshot and is no longer the
 > authoritative description of the repository. For the current distributed
-> runtime, benchmark flow, and repo layout, use `STATE.md`.
+> runtime, benchmark flow, repo layout, and embedding model evaluation results,
+> use `STATE.md` and `MODEL_FINDINGS.md`. The "How to Run" section below
+> has been updated to reflect all three current benchmark modes.
 
 ## Context for AI Models
 
@@ -455,6 +457,10 @@ Seeded demo intent:
 
 Four predefined scenarios are run in sequence:
 
+Note: the scenarios below are from the original `e2e_bench` demo harness.
+The curated `dscc-benchmark` runner has 13 scenarios — see `STATE.md` §10.3 for
+the full list including the three research cases (Cases 11–13).
+
 | # | Name | Agents | Expected Conflicts | Notes |
 |---|---|---|---|---|
 | 1 | Agents A and B describe the same invoice | A, B | A↔B | Tests basic two-agent semantic conflict |
@@ -646,37 +652,86 @@ The cosine similarity threshold that determines whether two embeddings are "sema
 
 ## 18. How to Run
 
-### 18.1 Full End-to-End Demo
+### 18.1 Build
 
 ```bash
-# Build
 cmake -S . -B /tmp/dslm_build
-cmake --build /tmp/dslm_build --target dscc-e2e-bench -j$(nproc)
+cmake --build /tmp/dslm_build --target dscc-e2e-bench dscc-benchmark dscc-testbench -j$(nproc)
+```
 
+### 18.2 Full End-to-End Demo
+
+```bash
 # Run (leaves Docker stack up for inspection)
 /tmp/dslm_build/dscc-e2e-bench
 
 # Run with auto-teardown
 E2E_TEARDOWN=1 /tmp/dslm_build/dscc-e2e-bench
 
-# Run with custom theta
-DSCC_THETA=0.30 /tmp/dslm_build/dscc-e2e-bench
+# Custom theta
+DSCC_THETA=0.75 E2E_TEARDOWN=1 /tmp/dslm_build/dscc-e2e-bench
 ```
 
-### 18.2 In-Process Lock Table Test
+### 18.3 Curated Benchmark — Single Mode (13 scenarios)
 
 ```bash
-cmake -S . -B /tmp/dslm_build
-cmake --build /tmp/dslm_build --target dscc-testbench -j$(nproc)
+E2E_TEARDOWN=1 /tmp/dslm_build/dscc-benchmark
+```
+
+Output: `logs/benchmark_run_<timestamp>.json`
+
+### 18.4 Curated Benchmark — Matrix Mode (3 models × 3 thetas × 13 scenarios)
+
+```bash
+# Full sweep
+DSLM_RUN_MODE=matrix E2E_TEARDOWN=1 /tmp/dslm_build/dscc-benchmark
+
+# Single model only (useful for resuming after a crash)
+DSLM_RUN_MODE=matrix DSLM_MATRIX_PROFILE=qwen E2E_TEARDOWN=1 /tmp/dslm_build/dscc-benchmark
+
+# Single model at a specific theta (fill in missing rows)
+DSLM_RUN_MODE=matrix DSLM_MATRIX_PROFILE=bge DSLM_MATRIX_THETA=0.95 \
+  DSLM_MATRIX_OUTPUT=logs/existing_matrix.csv \
+  E2E_TEARDOWN=1 /tmp/dslm_build/dscc-benchmark
+```
+
+Output: `logs/benchmark_run_<timestamp>_matrix.csv` + per-(model,theta) JSON files.
+
+### 18.5 Curated Benchmark — Soak Mode (persistent DB growth test)
+
+```bash
+# Default 2-hour run
+DSLM_RUN_MODE=soak E2E_TEARDOWN=1 /tmp/dslm_build/dscc-benchmark
+
+# Quick 30-minute sanity check
+DSLM_RUN_MODE=soak DSLM_SOAK_DURATION_MIN=30 E2E_TEARDOWN=1 /tmp/dslm_build/dscc-benchmark
+```
+
+Output: `logs/soak_run_<timestamp>.csv` (windowed latency snapshots every 60 s).
+
+### 18.6 Plotting
+
+```bash
+pip install matplotlib numpy pandas   # once
+
+python3 scripts/plot_matrix_metrics.py          # model comparison plots (8 PNGs)
+python3 scripts/plot_soak_test.py               # soak latency-over-time plots (7 PNGs)
+python3 scripts/plot_benchmark_report.py logs/benchmark_run_<timestamp>.json
+python3 scripts/plot_model_comparison.py logs/benchmark_run_*.json
+```
+
+### 18.7 In-Process Lock Table Test (no Docker)
+
+```bash
 /tmp/dslm_build/dscc-testbench
 ```
 
-### 18.3 Manual Docker Stack
+### 18.8 Manual Docker Stack
 
 ```bash
-docker compose up -d --build qdrant embedding-service dscc-node
+docker compose up -d --build qdrant embedding-service \
+  dscc-node-1 dscc-node-2 dscc-node-3 dscc-node-4 dscc-node-5 dscc-proxy
 docker compose down
-docker compose down -v   # also removes volumes
 ```
 
 ---
