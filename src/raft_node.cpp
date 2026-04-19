@@ -159,6 +159,23 @@ bool RaftNode::Propose(const dscc_raft::LogEntry& entry,
     return false;
 }
 
+bool RaftNode::AppendLocalEntry(const dscc_raft::LogEntry& entry) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!running_ || state_ != RaftState::LEADER) {
+        return false;
+    }
+    dscc_raft::LogEntry stamped = entry;
+    stamped.set_term(current_term_);
+    log_.push_back(stamped);
+
+    if (peer_addresses_.empty()) {
+        commit_index_ = static_cast<int64_t>(log_.size()) - 1;
+        commit_cv_.notify_all();
+        apply_cv_.notify_all();
+    }
+    return true;
+}
+
 bool RaftNode::WaitUntilApplied(int64_t index, std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lock(mu_);
     return apply_cv_.wait_for(lock, timeout, [&]() {

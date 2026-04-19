@@ -4,7 +4,7 @@ Here is a complete walkthrough of the `ActiveLockTable`, covering every path and
 
 ## The Core Data Model
 
-There is a single global mutex `mu_` that protects **all** state. The active locks live in an `unordered_map` keyed by `agent_id`. Each `SemanticLock` in the map holds the lock owner's embedding (called `centroid`), the threshold `θ` that was used, and a **per-lock FIFO waiter queue** — a `deque<shared_ptr<WaitQueueEntry>>`.
+There is a single global mutex `mu_` that protects **all** state. The active locks live in an `unordered_map` keyed by `agent_id`. Each `SemanticLock` in the map holds the lock owner's embedding (called `centroid`), the threshold `θ` that was used, a **`pending` flag** (true = reservation before Raft commit, false = fully committed), and a **per-lock FIFO waiter queue** — a `deque<shared_ptr<WaitQueueEntry>>`.
 
 Each `WaitQueueEntry` is a blocked thread that is sleeping on its own private `condition_variable`. This is the key design choice: instead of a single global CV that wakes everyone (thundering herd), each waiter has its own CV so only specific waiters are woken.
 
@@ -12,7 +12,9 @@ The two boolean flags on `WaitQueueEntry` — `ready` and `granted` — encode t
 
 ---
 
-## acquire() — The Blocking Path
+## acquire() — The Legacy Blocking Path (used by testbench only)
+
+> **Note:** The distributed leader path in `LockServiceImpl::AcquireGuard` now uses `wait_for_admission()` instead of `acquire()`. `acquire()` is preserved for the in-process testbench and backward compatibility. See the "wait_for_admission" section below for the current leader flow.
 
 Here is what happens line by line when a thread calls `acquire()`:
 
@@ -132,7 +134,7 @@ If `release()` is called for an agent that isn't in `active_`, `remove_lock_lock
 
 This is the most important function. It processes the waiter deque that was just detached from a released lock.
 
-```203:244:src/active_lock_table.cpp
+```277:318:src/active_lock_table.cpp
 void ActiveLockTable::rebalance_waiters_locked(
     std::deque<std::shared_ptr<WaitQueueEntry>> waiters,
     std::vector<std::shared_ptr<WaitQueueEntry>>& granted_waiters) {
@@ -151,9 +153,9 @@ void ActiveLockTable::rebalance_waiters_locked(
             continue;
         }
 
-        apply_acquire_locked(waiter->waiting_agent_id,
-                             waiter->embedding,
-                             waiter->theta);
+        insert_pending_locked(waiter->waiting_agent_id,
+                              waiter->embedding,
+                              waiter->theta);
         waiter->granted = true;
         waiter->ready = true;
         // ... log [LOCK_GRANT] ...
@@ -176,11 +178,11 @@ It pops waiters **front-to-back** (FIFO order) and for each one:
 
 ### Path B: No conflict (grant via handoff)
 
-- `apply_acquire_locked` inserts the waiter's agent into `active_` as a new lock holder.
+- `insert_pending_locked` inserts the waiter's agent into `active_` as a **pending** lock (reservation).
 - `granted = true` and `ready = true` are set on the `WaitQueueEntry`.
 - The waiter is added to `granted_waiters` — the list of waiters whose CVs will be notified after `mu_` is released.
 
-**When the sleeping thread wakes up** in `acquire()`, it sees `waiter->granted == true` and breaks out of the loop immediately without re-scanning for conflicts. This is safe because the rebalancer already verified no conflict existed and inserted the lock under `mu_` — the state hasn't changed.
+**When the sleeping thread wakes up** in `wait_for_admission()` (or `acquire()`), it sees `waiter->granted == true` and breaks out of the loop immediately without re-scanning for conflicts. This is safe because the rebalancer already verified no conflict existed and inserted the pending slot under `mu_` — the state hasn't changed. On the leader path, the caller then proceeds to Propose(ACQUIRE) through Raft, which promotes the pending slot to a real lock via the apply callback.
 
 ---
 
@@ -210,19 +212,23 @@ If all waiters from the released lock conflict with some other active lock, they
 
 ---
 
-## apply_acquire vs acquire — Two Paths Into the Table
+## Three Paths Into the Table
 
-There are two ways a lock gets inserted into `active_`:
+There are three ways a lock gets inserted or updated in `active_`:
 
-### `acquire()` — Leader's local admission path
+### `wait_for_admission()` — Leader's admission gate (current leader path)
 
-Called by `LockServiceImpl::AcquireGuard` on the leader. This is the **blocking** path: it runs `find_conflict_locked`, waits if needed, and inserts into `active_` when there's no conflict. The calling thread is blocked until the lock is granted.
+Called by `LockServiceImpl::AcquireGuard` on the leader. Blocks on per-lock wait queues (same as `acquire()`), but when the conflict clears, calls `insert_pending_locked` to insert a **pending** slot (`pending = true`). The pending slot participates in conflict detection but is not yet Raft-committed. The caller must follow up with `Propose(ACQUIRE)` + `WaitUntilApplied` to promote it, or `remove_pending` to cancel it.
+
+### `acquire()` — Legacy local admission path (testbench only)
+
+Used by the in-process testbench. Blocks on conflicts and inserts a **real** lock directly via `apply_acquire_locked` (with `pending = false`). Not used by the distributed leader path.
 
 ### `apply_acquire()` — Raft apply callback path
 
-Called by the `on_commit_` callback on every node (leader and followers) when a committed ACQUIRE log entry is applied. This calls `apply_acquire_locked` directly — **no conflict check, no blocking**. It simply inserts or updates the lock in `active_`.
+Called by the `on_commit_` callback on every node (leader and followers) when a committed ACQUIRE log entry is applied. This calls `apply_acquire_locked` directly — **no conflict check, no blocking**. On the **leader**, it typically finds the pending slot and **promotes** it (`pending = false`). On **followers**, the agent doesn't exist yet, so it inserts a new real lock directly.
 
-```171:186:src/active_lock_table.cpp
+```243:260:src/active_lock_table.cpp
 void ActiveLockTable::apply_acquire_locked(const std::string& agent_id,
                                            const std::vector<float>& embedding,
                                            float threshold) {
@@ -230,6 +236,7 @@ void ActiveLockTable::apply_acquire_locked(const std::string& agent_id,
     if (it != active_.end()) {
         it->second.centroid = embedding;
         it->second.threshold = threshold;
+        it->second.pending = false;    // promote pending → real
         return;
     }
 
@@ -237,13 +244,20 @@ void ActiveLockTable::apply_acquire_locked(const std::string& agent_id,
     lock_entry.agent_id = agent_id;
     lock_entry.centroid = embedding;
     lock_entry.threshold = threshold;
+    lock_entry.pending = false;
     active_.emplace(agent_id, std::move(lock_entry));
 }
 ```
 
-**Edge case: duplicate insert.** If `agent_id` already exists in `active_` (e.g., the leader's local `acquire()` already inserted it, and then the Raft apply callback fires `apply_acquire` for the same agent), it doesn't create a second entry. It updates the centroid and threshold in place. The waiter deque is left untouched. This prevents double-insertion from the leader's "admit locally, then replicate" ordering.
+**Pending promotion:** On the leader, `wait_for_admission` already inserted a pending slot. When the Raft ACQUIRE is committed and applied, `apply_acquire_locked` finds the existing pending entry and sets `pending = false`, promoting it to a real lock. The waiter deque is left untouched.
 
-Similarly, `apply_release()` just delegates to `release()`, which handles the "unknown agent_id" case gracefully (logs a warning, does nothing). So if the leader already released a lock locally and the Raft callback fires a second release, it's harmless.
+**Follower insertion:** On followers, no pending slot exists. `apply_acquire_locked` inserts a fresh real lock directly.
+
+### `remove_pending()` — Cleanup for failed Propose
+
+If `Propose(ACQUIRE)` fails or times out, the leader calls `remove_pending(agent_id)` to remove the pending slot and rebalance any waiters that were queued behind it. This only acts if the entry exists **and** is still pending — if the Raft apply callback already promoted it, `remove_pending` is a no-op (the compensating RELEASE handles cleanup through Raft instead).
+
+Similarly, `apply_release()` just delegates to `release()`, which handles the "unknown agent_id" case gracefully (logs a warning, does nothing). So if a compensating RELEASE fires for an agent that was already cleaned up, it's harmless.
 
 ---
 
@@ -292,14 +306,16 @@ If the notification happened *inside* `mu_`, the waking thread would immediately
 
 | Scenario | What Happens |
 |----------|-------------|
-| No conflict at all | Immediate insert into `active_`, no waiting |
+| No conflict at all | Immediate insert into `active_` — as pending (via `wait_for_admission`) on leader, as real (via `acquire`) in testbench |
 | Single conflict | Waiter queued behind strongest blocker, sleeps on per-waiter CV |
 | Multiple conflicts | Waiter queued behind the **highest similarity** active lock |
 | Release with no waiters | Lock removed from `active_`, nothing to rebalance |
 | Release with waiters, all can proceed | All waiters granted in FIFO order, all CVs notified |
 | Release with waiters, some conflict with other locks | Conflicting ones requeued (queue_hops++), non-conflicting ones granted |
 | Earlier waiter granted blocks later waiter in same rebalance | Later waiter is requeued behind the just-granted waiter |
-| Duplicate `apply_acquire` (Raft callback after local acquire) | Updates centroid/threshold in place, doesn't create second lock |
+| `apply_acquire` on leader (Raft callback after pending slot) | Promotes pending → real (`pending = false`), updates centroid/threshold |
+| `apply_acquire` on follower (no prior pending slot) | Inserts new real lock directly |
+| `remove_pending` after Propose failure | Removes pending slot if still pending, rebalances waiters; no-op if already promoted |
 | Duplicate `apply_release` (Raft callback after local release) | Logs warning "unknown agent_id", no-op |
 | Release for unknown agent | Logs warning, returns immediately |
 | Waiter woken with `granted == false` | Re-enters the `while(true)` loop, re-runs `find_conflict_locked` from scratch |
