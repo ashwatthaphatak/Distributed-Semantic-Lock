@@ -216,7 +216,8 @@ CaseExecution run_case(const std::string& case_name,
             }
 
             execution.results[i].trace =
-                table.acquire(plan.agent_id, plan.embedding, threshold);
+                table.wait_for_admission(plan.agent_id, plan.embedding, threshold);
+            table.apply_acquire(plan.agent_id, plan.embedding, threshold);
 
             execution.results[i].interval.acquire_success_us = now_us();
             const size_t active_now = table.size();
@@ -236,7 +237,7 @@ CaseExecution run_case(const std::string& case_name,
             std::this_thread::sleep_for(std::chrono::milliseconds(plan.hold_ms));
 
             execution.results[i].interval.release_call_us = now_us();
-            table.release(plan.agent_id);
+            table.apply_release(plan.agent_id);
 
             execution.results[i].interval.release_us = now_us();
             {
