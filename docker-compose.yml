@@ -1,4 +1,4 @@
-# Runs the distributed end-to-end stack: Ollama embeddings, Qdrant, three dscc nodes, and a leader-aware proxy.
+# Runs the distributed end-to-end stack: Ollama embeddings, Qdrant, five dscc nodes, and a leader-aware proxy.
 # e2e_bench.cpp brings this stack up before it starts scenario traffic.
 
 services:

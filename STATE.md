@@ -2,7 +2,7 @@
 
 ## Context for AI Models
 
-This document is the current-state companion to `CURRENT_SYSTEM.md`.
+This document is the current-state companion to `expl_docs/VERSION_0.md`.
 It is intentionally focused on what exists in the repository now, how the current distributed runtime actually behaves, what the benchmark harness measures, and which architectural caveats are still unresolved.
 
 Use this file when you need an up-to-date mental model of the repo before making changes.
@@ -68,26 +68,27 @@ Some benchmark scenarios still report correctness violations, so the repo should
 
 - semantic lock ownership is still primarily in-memory
 - there is no durable snapshot/restore path for active lock state
-- the leader acquires locally before `ACQUIRE` is durably committed through Raft
 - correctness violations still appear in some benchmark scenarios
 - the benchmark correctness metric is interval-overlap based and depends on timestamp semantics
 - there is no lease-based expiration or heartbeat-based cleanup for abandoned locks
 - there is no persistent recovery story for active lock state after process restart
 - the current read path is conservative because reads also go through semantic locking
 
-### 2.3 Most important architectural caveat
+### 2.3 Current leader path (pending/promote with Raft)
 
 The current leader path is:
 
-1. locally acquire semantic lock
-2. propose `ACQUIRE` via Raft
-3. perform Qdrant work
-4. propose `RELEASE` via Raft
-5. apply release through the Raft callback
+1. `wait_for_admission` — block until no semantic conflict, then insert a **pending** slot
+2. `Propose(ACQUIRE)` via Raft — replicate to quorum
+3. `WaitUntilApplied` — block until the apply callback promotes pending → real lock
+4. perform Qdrant work (upsert for writes, search for reads)
+5. `Propose(RELEASE)` via Raft — replicate and apply; release lock and rebalance waiters
 
-So the system is not yet "Raft-authoritative before admission."
-It is "leader-admitted, then replicated."
-That distinction matters when reasoning about correctness and benchmark violations.
+The pending slot (step 1) participates in conflict detection: subsequent conflicting requests block behind it even before the Raft commit. This prevents any request from slipping through between admission and commit. No Qdrant operation happens until the lock is durably committed through Raft (step 3 completes before step 4 begins).
+
+If `Propose` fails (quorum not reached), `remove_pending` cleans up the pending slot and a compensating `RELEASE` is appended via `AppendLocalEntry` to cancel any partially replicated ghost `ACQUIRE`.
+
+This is the "Raft-first with pending/promote" model described in `expl_docs/VERSION_1.md` §7.2 (Option B). The system is Raft-authoritative before proceeding to Qdrant. The remaining correctness violations observed in benchmarks are likely related to timestamp-boundary effects in the overlap metric rather than a fundamental admission ordering issue.
 
 ---
 
@@ -123,7 +124,7 @@ DSLM/
 │   ├── D.json
 │   └── E.json
 ├── README.md
-├── CURRENT_SYSTEM.md              # historical architecture snapshot
+├── expl_docs/VERSION_0.md         # historical architecture snapshot (formerly CURRENT_SYSTEM.md)
 ├── STATE.md
 └── logs/benchmark_run_<timestamp>.json
 ```
@@ -169,9 +170,11 @@ Qdrant             -> vector persistence / vector search
 - currently used for embedding generation from the benchmark/demo harness
 
 `dscc-proxy`
-- polls the cluster for leader information
-- forwards `AcquireGuard` and `ReleaseGuard`
+- C++ gRPC service (`src/proxy_main.cpp`, `src/proxy_service_impl.cpp/.h`), built by the same CMake toolchain and Dockerfile as the nodes (the original architecture plan proposed a Go proxy; the decision was made to keep the entire stack in C++ for build simplicity and a single container image)
+- polls the cluster for leader information via `RaftService::GetLeader`
+- forwards `AcquireGuard` and `ReleaseGuard` to the current leader
 - retries on `NOT_LEADER`, `UNAVAILABLE`, and `DEADLINE_EXCEEDED`
+- caches gRPC channels per backend address
 
 `dscc-node-*`
 - exposes both the client-facing lock service and the Raft service
@@ -199,17 +202,20 @@ Qdrant             -> vector persistence / vector search
 The current distributed request path is:
 
 1. client or benchmark sends `AcquireGuard` to `dscc-proxy`
-2. proxy resolves or refreshes the current leader
+2. proxy resolves or refreshes the current leader via `RaftService::GetLeader`
 3. proxy forwards the RPC to the leader node
-4. leader validates request fields
-5. leader performs local semantic admission through `ActiveLockTable::acquire`
-6. once locally admitted, leader proposes `ACQUIRE` through Raft
-7. after proposal success:
+4. leader validates request fields (`agent_id`, `embedding` non-empty)
+5. leader checks `raft_->IsLeader()`; if not leader, returns `FAILED_PRECONDITION` with `leader-address` trailing metadata
+6. leader calls `ActiveLockTable::wait_for_admission` — blocks until no semantic conflict, then inserts a **pending** slot
+7. leader calls `RaftNode::Propose(ACQUIRE)` — replicates to quorum and commits
+8. leader calls `RaftNode::WaitUntilApplied` — blocks until the apply callback promotes pending → real lock on all replicas
+9. leader performs Qdrant operation (the lock is now durably committed):
    - write: upsert vector and metadata into Qdrant
    - read: issue vector similarity query against Qdrant
-8. leader proposes `RELEASE` through Raft
-9. apply callback releases the active lock and reconsider waiters
-10. RPC returns timing and trace metadata
+10. leader calls `RaftNode::Propose(RELEASE)` and `WaitUntilApplied` — apply callback releases the lock and rebalances waiters
+11. RPC returns timing and trace metadata
+
+If `Propose(ACQUIRE)` fails, `remove_pending` cleans up the local pending slot and a compensating `RELEASE` is appended via `AppendLocalEntry`. If `Propose(RELEASE)` fails, `ScopeExit` retries the release on cleanup.
 
 Important detail:
 
@@ -605,7 +611,8 @@ If you are changing system behavior, these are the most important files:
 |---|---|
 | `README.md` | Build commands, run commands for all three benchmark modes, plotting instructions |
 | `STATE.md` | This file — authoritative current-state description |
-| `CURRENT_SYSTEM.md` | Deep-dive architecture reference (mostly stable; note the historical caveat at the top) |
+| `expl_docs/VERSION_0.md` | Historical deep-dive architecture reference (formerly `CURRENT_SYSTEM.md`; note the caveat at the top — use `STATE.md` for current truth) |
+| `expl_docs/VERSION_1.md` | Original architecture plan for the distributed system (designed for 3 nodes with a Go proxy; actual implementation uses 5 nodes with a C++ proxy — see header note in that file) |
 | `MODEL_FINDINGS.md` | Embedding model evaluation results from the matrix sweep — metric definitions, per-case tables, recommendation |
 
 ---
@@ -624,8 +631,8 @@ The repository is currently in this state:
 But:
 
 - benchmark correctness is not yet clean across all 10 original stress scenarios
-- local-before-commit admission is still a major architectural caveat
 - active lock state is still in-memory and non-durable
+- there is no lease-based expiry for abandoned locks
 - soak test (2-hour DB growth experiment) has not yet been run to completion
 
 So the repo should be treated as:
