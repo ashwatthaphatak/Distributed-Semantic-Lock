@@ -163,6 +163,7 @@ target_link_libraries(dscc-proxy
 add_executable(dscc-raft-test
     src/raft_test.cpp
     src/threadsafe_log.cpp
+    src/active_lock_table.cpp
     src/raft_node.cpp
     src/raft_service_impl.cpp
 )
