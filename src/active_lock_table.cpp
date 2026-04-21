@@ -82,6 +82,9 @@ AcquireTrace ActiveLockTable::wait_for_admission(const std::string& agent_id,
                                                   const std::vector<float>& embedding,
                                                   float threshold) {
     std::unique_lock<std::mutex> lock(mu_);
+
+    sweep_cv_.wait(lock, [this]() { return !sweep_in_progress_; });
+
     AcquireTrace trace;
 
     while (true) {
@@ -206,6 +209,26 @@ std::vector<std::string> ActiveLockTable::active_agent_ids() const {
 
     std::sort(agent_ids.begin(), agent_ids.end());
     return agent_ids;
+}
+
+std::vector<std::string> ActiveLockTable::begin_leader_sweep() {
+    std::lock_guard<std::mutex> lock(mu_);
+    sweep_in_progress_ = true;
+    std::vector<std::string> ids;
+    ids.reserve(active_.size());
+    for (const auto& [id, entry] : active_) {
+        (void)entry;
+        ids.push_back(id);
+    }
+    return ids;
+}
+
+void ActiveLockTable::end_leader_sweep() {
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        sweep_in_progress_ = false;
+    }
+    sweep_cv_.notify_all();
 }
 
 void ActiveLockTable::print_active_locks() const {

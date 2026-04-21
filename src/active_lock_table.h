@@ -79,6 +79,12 @@ public:
 
     std::vector<std::string> active_agent_ids() const;
 
+    // Atomically gate new wait_for_admission callers and return a snapshot of
+    // all currently held agent IDs.  The caller must call end_leader_sweep()
+    // after proposing RELEASE entries for the returned IDs.
+    std::vector<std::string> begin_leader_sweep();
+    void end_leader_sweep();
+
     static float cosine_similarity(const std::vector<float>& a,
                                    const std::vector<float>& b);
 
@@ -113,4 +119,6 @@ private:
     // arrive by id through both the local service path and the Raft callback.
     std::unordered_map<std::string, SemanticLock> active_;
     mutable std::mutex mu_;
+    bool sweep_in_progress_ = false;
+    std::condition_variable sweep_cv_;
 };

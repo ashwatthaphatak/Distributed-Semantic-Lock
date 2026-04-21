@@ -74,6 +74,8 @@ void RaftNode::Start() {
     apply_thread_ = std::thread(&RaftNode::ApplyLoop, this);
     election_timer_thread_ = std::thread(&RaftNode::ElectionTimerLoop, this);
     heartbeat_thread_ = std::thread(&RaftNode::HeartbeatLoop, this);
+
+    FireLeaderCallbackIfNeeded();
 }
 
 void RaftNode::Stop() {
@@ -174,6 +176,34 @@ bool RaftNode::AppendLocalEntry(const dscc_raft::LogEntry& entry) {
         apply_cv_.notify_all();
     }
     return true;
+}
+
+void RaftNode::SetLeaderChangeCallback(LeaderCallback callback) {
+    on_leader_ = std::move(callback);
+}
+
+void RaftNode::FireLeaderCallbackIfNeeded() {
+    if (!on_leader_) {
+        return;
+    }
+
+    int64_t ci = 0;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (state_ != RaftState::LEADER) {
+            return;
+        }
+        ci = commit_index_;
+    }
+
+    std::thread([this, ci]() {
+        if (ci > 0) {
+            WaitUntilApplied(ci, std::chrono::seconds(5));
+        }
+        if (on_leader_) {
+            on_leader_();
+        }
+    }).detach();
 }
 
 bool RaftNode::WaitUntilApplied(int64_t index, std::chrono::milliseconds timeout) {
@@ -481,6 +511,8 @@ void RaftNode::StartElection() {
             }
         }
     }
+
+    FireLeaderCallbackIfNeeded();
 }
 
 void RaftNode::BecomeLeaderLocked() {

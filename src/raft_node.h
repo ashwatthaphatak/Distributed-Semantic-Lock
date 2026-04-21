@@ -22,6 +22,7 @@
 enum class RaftState { FOLLOWER, CANDIDATE, LEADER };
 
 using ApplyCallback = std::function<void(const dscc_raft::LogEntry&)>;
+using LeaderCallback = std::function<void()>;
 
 struct RaftConfig {
     int heartbeat_ms = 75;
@@ -60,6 +61,8 @@ public:
         const dscc_raft::SnapshotRequest& request);
     dscc_raft::LeaderInfo HandleGetLeader() const;
 
+    void SetLeaderChangeCallback(LeaderCallback callback);
+
     bool IsLeader() const;
     RaftState State() const;
     std::string LeaderAddress() const;
@@ -95,6 +98,8 @@ private:
                          const dscc_raft::VoteRequest& request,
                          dscc_raft::VoteResponse& response);
 
+    void FireLeaderCallbackIfNeeded();
+
     int64_t RandomElectionTimeoutMs() const;
     int64_t LastLogIndexLocked() const;
     int64_t LastLogTermLocked() const;
@@ -104,6 +109,7 @@ private:
     std::string service_address_;
     std::vector<std::string> peer_addresses_;
     ApplyCallback on_commit_;
+    LeaderCallback on_leader_;
     RaftConfig config_;
 
     mutable std::mutex mu_;
