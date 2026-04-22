@@ -176,6 +176,21 @@ target_link_libraries(dscc-e2e-demo
 target_compile_features(dscc-e2e-demo PRIVATE cxx_std_20)
 target_compile_definitions(dscc-e2e-demo PRIVATE DSLM_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
 
+add_executable(dscc-paraphrase-gauntlet-demo
+    src/paraphrase_gauntlet_demo.cpp
+)
+
+target_include_directories(dscc-paraphrase-gauntlet-demo PRIVATE ${DSCC_GENERATED_DIR})
+target_link_libraries(dscc-paraphrase-gauntlet-demo
+    dscc_proto
+    ${DSLM_GRPC_TARGET}
+    protobuf::libprotobuf
+    Threads::Threads
+)
+
+target_compile_features(dscc-paraphrase-gauntlet-demo PRIVATE cxx_std_20)
+target_compile_definitions(dscc-paraphrase-gauntlet-demo PRIVATE DSLM_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+
 add_executable(dscc-raft-test
     src/raft_test.cpp
     src/threadsafe_log.cpp

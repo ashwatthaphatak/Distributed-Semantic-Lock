@@ -93,10 +93,10 @@ struct Config {
     };
 
     float theta        = 0.78f;
-    int   lock_hold_ms = 1500;
+    int   lock_hold_ms = 500;
     bool  teardown_on_exit = false;
 
-    int op_interval_ms  = 3000;
+    int op_interval_ms  = 1000;
     int duration_sec    = 720;
 };
 
