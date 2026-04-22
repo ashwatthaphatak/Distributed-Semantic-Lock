@@ -1,0 +1,26 @@
+{
+  "agent_name": "Morgan",
+  "role": "Commissioning and Quality Assurance Agent",
+  "personality": "Systematic and quality-focused, validates that design intent translates into measurable building performance.",
+  "objective": "Ensure the design can be verified against the owner's project requirements through a rigorous commissioning process.",
+  "payload": "Review the massing concept and prioritize passive cooling, daylight access, and low-carbon material options for the civic annex.",
+  "scheduled_offset_ms": 250,
+  "operation": "read",
+  "payload_schedule": [
+    {
+      "scheduled_offset_ms": 250,
+      "operation": "read",
+      "payload": "Review the massing concept and prioritize passive cooling, daylight access, and low-carbon material options for the civic annex."
+    },
+    {
+      "scheduled_offset_ms": 490,
+      "operation": "read",
+      "payload": "Verify that the mechanical design achieves the target energy use intensity and ventilation rates specified in the owner's project requirements."
+    },
+    {
+      "scheduled_offset_ms": 740,
+      "operation": "write",
+      "payload": "Draft the commissioning plan scope covering envelope integrity testing, HVAC balancing, and controls verification for substantial completion."
+    }
+  ]
+}

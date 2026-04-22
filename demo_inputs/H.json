@@ -1,0 +1,26 @@
+{
+  "agent_name": "Harper",
+  "role": "Facade Engineering Agent",
+  "personality": "Detail-oriented and performance-driven, focused on envelope thermal behavior, weatherproofing, and visual quality.",
+  "objective": "Design a high-performance building envelope that meets energy targets, durability requirements, and architectural intent.",
+  "payload": "Analyze facade zones with high solar heat gain and evaluate shading device options with performance modeling for annual energy impact.",
+  "scheduled_offset_ms": 70,
+  "operation": "read",
+  "payload_schedule": [
+    {
+      "scheduled_offset_ms": 70,
+      "operation": "read",
+      "payload": "Analyze facade zones with high solar heat gain and evaluate shading device options with performance modeling for annual energy impact."
+    },
+    {
+      "scheduled_offset_ms": 280,
+      "operation": "write",
+      "payload": "Specify curtain wall mullion profiles and thermal break detailing for the south and west exposures of the civic annex."
+    },
+    {
+      "scheduled_offset_ms": 530,
+      "operation": "write",
+      "payload": "Develop a mockup testing protocol for the curtain wall system covering air infiltration, water penetration, and structural performance."
+    }
+  ]
+}
