@@ -1,10 +1,17 @@
 """
-Realistic workload generator for the Distributed Semantic Lock Manager.
+Workload generator for the Distributed Semantic Lock Manager.
 
-Simulates 13 AI agent personas sending AcquireGuard requests through the
-gRPC proxy with organic timing variation.  Each Locust user adopts one
-persona, picks a random payload from that persona's schedule on every
-request, and waits a randomised interval before the next one.
+Mirrors the workload emitted by ``src/e2e_demo.cpp`` so Locust generates the
+same dense semantic-conflict traffic:
+
+* Only agents A-E participate by default.  These personas have overlapping
+  payloads (A<->B massing concept, D<->E atrium phasing, etc.), which drives
+  frequent cosine-similarity conflicts.
+* Each user sticks to the FIRST payload in its agent's ``payload_schedule``
+  (matching the ``load_template`` behaviour in ``e2e_demo.cpp``).  Reusing a
+  single text per persona maximises the conflict rate.
+* Users fire AcquireGuard roughly every 1 second with small jitter, like the
+  C++ demo's ``DEMO_OP_INTERVAL_MS`` (default 1000ms).
 
 Setup (one-time):
 
@@ -27,15 +34,19 @@ Usage:
     # 3a. Run Locust with the web UI (http://localhost:8089):
     locust -f locustfile.py
 
-    # 3b. Or headless — 13 users (one per persona), ramp 3/s, run 10 min:
-    locust -f locustfile.py --headless -u 13 -r 3 --run-time 10m
+    # 3b. Or headless — 5 users (one per A-E persona), ramp 5/s, run 5 min:
+    locust -f locustfile.py --headless -u 5 -r 5 --run-time 5m
 
 Environment variables:
 
-    DSCC_PROXY          gRPC proxy address       (default: localhost:50050)
-    EMBEDDING_HOST      Embedding service host    (default: localhost)
-    EMBEDDING_PORT      Embedding service port    (default: 7997)
-    EMBEDDING_MODEL     Model name for embeddings (default: all-minilm:latest)
+    DSCC_PROXY                    gRPC proxy address        (default: localhost:50050)
+    EMBEDDING_HOST                Embedding service host    (default: localhost)
+    EMBEDDING_PORT                Embedding service port    (default: 7997)
+    EMBEDDING_MODEL               Model name for embeddings (default: all-minilm:latest)
+    DSCC_AGENT_LABELS             Agents to include         (default: "ABCDE", use "" for all)
+    DSCC_OP_INTERVAL_MS           Target interval per user  (default: 1000)
+    DSCC_OP_JITTER_MS             +/- jitter around interval (default: 200)
+    DSCC_USE_FIRST_PAYLOAD_ONLY   1 = always use first payload (default: 1)
 """
 
 import glob
@@ -49,7 +60,7 @@ import uuid
 
 import grpc
 import requests
-from locust import User, task, between, events
+from locust import User, task, events
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +72,25 @@ EMBEDDING_HOST = os.environ.get("EMBEDDING_HOST", "localhost")
 EMBEDDING_PORT = os.environ.get("EMBEDDING_PORT", "7997")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "all-minilm:latest")
 
+# Conflict-dense workload controls — defaults mirror src/e2e_demo.cpp.
+#
+# AGENT_LABELS restricts which demo personas participate.  The default "ABCDE"
+# matches the label set used by e2e_demo.cpp and contains deliberate payload
+# overlaps (A<->B, D<->E) that drive semantic conflicts.  Set to "" (empty) to
+# include every *.json file in demo_inputs/ (the old 13-agent behaviour).
+AGENT_LABELS = os.environ.get("DSCC_AGENT_LABELS", "ABCDE")
+
+# Target interval between ops per user, with optional jitter.  Matches
+# DEMO_OP_INTERVAL_MS (default 1000ms) in e2e_demo.cpp.
+OP_INTERVAL_MS = int(os.environ.get("DSCC_OP_INTERVAL_MS", "1000"))
+OP_JITTER_MS = int(os.environ.get("DSCC_OP_JITTER_MS", "200"))
+
+# When truthy, every user always sends the FIRST payload in its agent's
+# payload_schedule, exactly like load_template() in e2e_demo.cpp.  Reusing a
+# single text per persona keeps conflicts maximally dense.  Set to 0 to fall
+# back to the previous behaviour of picking a random payload per request.
+USE_FIRST_PAYLOAD_ONLY = os.environ.get("DSCC_USE_FIRST_PAYLOAD_ONLY", "1") == "1"
+
 AGENTS = []
 EMBEDDING_CACHE = {}
 _init_lock = threading.Lock()
@@ -68,11 +98,15 @@ _initialised = False
 
 
 def _load_agents():
+    label_filter = set(AGENT_LABELS) if AGENT_LABELS else None
+
     agents = []
     for path in sorted(glob.glob(os.path.join(DEMO_INPUTS_DIR, "*.json"))):
+        label = os.path.splitext(os.path.basename(path))[0]
+        if label_filter is not None and label not in label_filter:
+            continue
         with open(path) as f:
             data = json.load(f)
-        label = os.path.splitext(os.path.basename(path))[0]
 
         payloads = []
         for entry in data.get("payload_schedule", []):
@@ -86,12 +120,26 @@ def _load_agents():
                 "operation": data.get("operation", "write"),
             })
 
+        # Mirror e2e_demo.cpp's load_template(): collapse the schedule down to
+        # its first entry so every request from this persona reuses the same
+        # text.  This keeps semantic conflicts maximally dense.
+        if USE_FIRST_PAYLOAD_ONLY:
+            payloads = payloads[:1]
+
         agents.append({
             "label": label,
             "name": data["agent_name"],
             "role": data["role"],
             "payloads": payloads,
         })
+
+    if label_filter is not None:
+        missing = sorted(label_filter - {a["label"] for a in agents})
+        if missing:
+            logger.warning(
+                "Requested agent labels not found in %s: %s",
+                DEMO_INPUTS_DIR, ",".join(missing),
+            )
     return agents
 
 
@@ -169,7 +217,13 @@ def _next_agent():
 
 
 class DSLMUser(User):
-    wait_time = between(2, 8)
+    # Tight, near-constant pacing that matches the thread loop in e2e_demo.cpp
+    # (``std::this_thread::sleep_for(interval_ms)`` per request).  Falls back
+    # to a minimum of 50 ms if the configured window would go non-positive.
+    def wait_time(self):
+        low = max(0.05, (OP_INTERVAL_MS - OP_JITTER_MS) / 1000.0)
+        high = max(low, (OP_INTERVAL_MS + OP_JITTER_MS) / 1000.0)
+        return random.uniform(low, high)
 
     def on_start(self):
         _ensure_proto_modules()
@@ -179,9 +233,15 @@ class DSLMUser(User):
         self.channel = grpc.insecure_channel(PROXY_TARGET)
         self.stub = dscc_pb2_grpc.LockServiceStub(self.channel)
         self.seq = 0
+
+        # Stagger user startup the same way e2e_demo.cpp launches its worker
+        # threads 200 ms apart, so we don't get a thundering-herd at t=0.
+        time.sleep(random.uniform(0, 0.2))
+
         logger.info(
-            "User started as %s (%s) — %d payloads",
-            self.agent["name"], self.agent["role"], len(self.agent["payloads"]),
+            "User started as %s (%s) — %d payload(s), interval≈%dms",
+            self.agent["name"], self.agent["role"],
+            len(self.agent["payloads"]), OP_INTERVAL_MS,
         )
 
     def on_stop(self):
@@ -190,6 +250,9 @@ class DSLMUser(User):
 
     @task
     def acquire_guard(self):
+        # When USE_FIRST_PAYLOAD_ONLY is set (default), self.agent["payloads"]
+        # has been trimmed to length 1, so this picks the single canonical
+        # text for this persona — matching e2e_demo.cpp.
         payload = random.choice(self.agent["payloads"])
         self.seq += 1
         agent_id = (

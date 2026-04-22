@@ -1,16 +1,20 @@
-// Long-running choreographed demo for a 12-minute distributed systems presentation.
+// Choreographed demo for a ~5-minute distributed systems presentation.
 // Drives continuous traffic through the full Docker stack (embedding -> proxy -> Raft nodes -> Qdrant)
-// while executing scripted chaos phases (leader kills, follower stops, quorum degradation, recovery).
+// while executing three scripted chaos scenarios:
+//   1) Leader failover
+//   2) Rejoined node catch-up
+//   3) Quorum collapse (kill 3 followers; system halts because quorum cannot be reached)
+// The demo ends immediately after the quorum-collapse scenario.
 //
 // Build target: dscc-e2e-demo
-// Usage:       ./build/dscc-e2e-demo          (uses defaults, ~12 minutes)
+// Usage:       ./build/dscc-e2e-demo          (uses defaults, ~5 minutes)
 //
 // Environment overrides:
 //   DSCC_THETA, DSCC_LOCK_HOLD_MS, QDRANT_COLLECTION,
 //   EMBEDDING_IMAGE, EMBEDDING_MODEL_ID,
 //   E2E_TEARDOWN (1 to tear down on exit),
-//   DEMO_OP_INTERVAL_MS (ms between operations per agent, default 3000),
-//   DEMO_DURATION_SEC   (total demo runtime in seconds, default 720 = 12 min)
+//   DEMO_OP_INTERVAL_MS (ms between operations per agent, default 1000),
+//   DEMO_DURATION_SEC   (total demo runtime in seconds, default 300 = 5 min)
 
 #include "dscc.grpc.pb.h"
 #include "dscc_raft.grpc.pb.h"
@@ -97,7 +101,7 @@ struct Config {
     bool  teardown_on_exit = false;
 
     int op_interval_ms  = 1000;
-    int duration_sec    = 720;
+    int duration_sec    = 300;
 };
 
 // ---------------------------------------------------------------------------
@@ -891,78 +895,50 @@ void phase_old_leader_rejoin(const Config& cfg, WorkloadStats& stats) {
 }
 
 void phase_quorum_degradation(const Config& cfg, WorkloadStats& stats) {
-    banner("PHASE 4: QUORUM STRESS TEST");
+    banner("PHASE 4: QUORUM COLLAPSE — SYSTEM HALT");
 
-    auto leader = wait_for_leader(cfg, 8);
-    std::vector<std::string> followers;
-    for (auto& svc : cfg.node_service_names) {
-        if (svc != leader.service_name) followers.push_back(svc);
-    }
-
-    phase_log("Stopping 1 follower — cluster still has 4/5 nodes (above quorum of 3).");
-    chaos("Stopping " + followers[0]);
-    compose_cmd(cfg, "stop " + followers[0]);
-    print_cluster_status(cfg);
-    std::this_thread::sleep_for(std::chrono::seconds(5));
-    stats.print_summary("4/5 Nodes");
-
-    phase_log("Stopping 2nd follower — cluster at bare quorum: 3/5 nodes.");
-    chaos("Stopping " + followers[1]);
-    compose_cmd(cfg, "stop " + followers[1]);
-    print_cluster_status(cfg);
-    std::this_thread::sleep_for(std::chrono::seconds(5));
-    stats.print_summary("3/5 Nodes (bare quorum)");
-
-    phase_log("Restarting both followers to restore full cluster.");
-    recover("Restarting " + followers[0] + " and " + followers[1]);
-    compose_cmd(cfg, "start " + followers[0]);
-    compose_cmd(cfg, "start " + followers[1]);
-
-    for (size_t i = 0; i < cfg.node_targets.size(); ++i) {
-        if (cfg.node_service_names[i] == followers[0] ||
-            cfg.node_service_names[i] == followers[1]) {
-            try { wait_for_node_ready(cfg.node_targets[i], 15); } catch (...) {}
-        }
-    }
-    wait_for_leader(cfg, 10);
-    recover("Full 5-node cluster restored.");
-    print_cluster_status(cfg);
-}
-
-void phase_final_consistency(const Config& cfg, WorkloadStats& stats) {
-    banner("PHASE 5: CONSISTENCY VERIFICATION");
-
-    phase_log("Checking cluster convergence and Qdrant state...");
-    print_cluster_status(cfg);
-
-    int count = qdrant_point_count(cfg);
-    if (count >= 0)
-        ok("Qdrant collection has " + std::to_string(count) + " points.");
-    else
-        fail("Could not query Qdrant point count.");
-
+    auto leader = wait_for_leader(cfg, 10);
     auto nodes = poll_cluster(cfg);
-    int64_t leader_term = 0;
+
+    std::vector<std::string> followers;
     for (auto& n : nodes) {
-        if (n.is_leader) leader_term = n.term;
+        if (n.reachable && !n.is_leader) followers.push_back(n.service_name);
     }
 
-    bool all_converged = true;
-    for (auto& n : nodes) {
-        if (!n.reachable) {
-            fail(n.service_name + " is unreachable.");
-            all_converged = false;
-        } else if (n.term != leader_term) {
-            warn(n.service_name + " on term " + std::to_string(n.term) +
-                 " vs leader term " + std::to_string(leader_term));
-        }
+    if (followers.size() < 3) {
+        fail("Need at least 3 reachable followers for this scenario; have " +
+             std::to_string(followers.size()) + ". Aborting phase.");
+        return;
     }
 
-    if (all_converged) {
-        ok("All 5 nodes reachable and converged on term " + std::to_string(leader_term) + ".");
+    phase_log("Leader: " + leader.service_name + " (term " + std::to_string(leader.term) + ")");
+    phase_log("Raft quorum for a 5-node cluster = 3. Killing 3 followers will leave 2/5 nodes — below quorum.");
+    print_cluster_status(cfg);
+
+    chaos("Stopping follower #1: " + followers[0] + "  ->  4/5 nodes (still above quorum)");
+    compose_cmd(cfg, "stop " + followers[0]);
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+    print_cluster_status(cfg);
+
+    chaos("Stopping follower #2: " + followers[1] + "  ->  3/5 nodes (bare quorum)");
+    compose_cmd(cfg, "stop " + followers[1]);
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+    print_cluster_status(cfg);
+
+    chaos("Stopping follower #3: " + followers[2] + "  ->  2/5 nodes (QUORUM LOST)");
+    compose_cmd(cfg, "stop " + followers[2]);
+    print_cluster_status(cfg);
+
+    phase_log("Cluster is BELOW QUORUM. Raft cannot replicate log entries; all writes will block and eventually fail.");
+    phase_log("Observing halted state for 30 seconds — expect timeouts and zero successful writes...");
+
+    for (int i = 0; i < 6; ++i) {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        print_cluster_status(cfg);
     }
 
-    stats.print_summary("Final");
+    stats.print_summary("Post-Quorum-Loss (system halted)");
+    phase_log("Scenario complete — system remains halted as expected. Ending demo.");
 }
 
 // ---------------------------------------------------------------------------
@@ -1047,22 +1023,20 @@ int main() {
 
         // -- Define phases --
         // Times are relative to demo start (when workload begins).
+        // Total runtime ~5 minutes. The demo exits as soon as the final phase completes.
         std::vector<Phase> phases = {
             {0,   "Steady State",
-             "Normal operation with all 5 nodes. Observe semantic conflict detection.",
+             "Brief baseline: all 5 nodes healthy. Observe semantic conflict detection.",
              phase_steady_state},
-            {120, "Leader Failover",
+            {20,  "Leader Failover",
              "Kill the Raft leader mid-operation. Watch election and automatic recovery.",
              phase_leader_kill},
-            {270, "Node Recovery",
+            {90,  "Node Recovery",
              "Restart the killed node. Watch it rejoin and catch up on Raft log entries.",
              phase_old_leader_rejoin},
-            {420, "Quorum Degradation",
-             "Progressively stop followers. Test quorum boundary at 3/5, then restore.",
+            {180, "Quorum Collapse",
+             "Kill 3 followers to breach quorum. System halts because Raft cannot commit.",
              phase_quorum_degradation},
-            {600, "Consistency Check",
-             "Verify all nodes converged. Check Qdrant state. Print final stats.",
-             phase_final_consistency},
         };
 
         // -- Print demo roadmap --
@@ -1072,8 +1046,9 @@ int main() {
                      "  " + p.name + ansi::kReset);
             log_line(std::string(ansi::kDim) + "         " + p.description + ansi::kReset);
         }
-        log_line(std::string(ansi::kBold) + "  " + format_elapsed(cfg.duration_sec) +
-                 "  Demo ends" + ansi::kReset);
+        log_line(std::string(ansi::kBold) +
+                 "  Demo ends immediately after 'Quorum Collapse' completes (≈ " +
+                 format_elapsed(cfg.duration_sec) + " total)" + ansi::kReset);
         log_line("");
 
         // -- Start continuous workload --
@@ -1112,6 +1087,8 @@ int main() {
                     fail(std::string("Phase '") + p.name + "' error: " + ex.what());
                 }
                 ++next_phase;
+                // End the demo as soon as the final phase (quorum collapse) completes.
+                if (next_phase >= phases.size()) break;
                 next_health_sec = static_cast<int>(elapsed) + 15;
                 continue;
             }
