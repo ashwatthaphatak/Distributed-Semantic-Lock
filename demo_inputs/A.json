@@ -3,39 +3,39 @@
   "role": "Sustainability-Focused Design Agent",
   "personality": "Values low embodied carbon, daylight quality, and long-term energy performance.",
   "objective": "Guide early architectural decisions toward measurable sustainability outcomes.",
-      "payload": "Review the massing concept and prioritize passive cooling, daylight access, and low-carbon material options for the civic annex.",
+  "payload": "Review the massing concept and prioritize passive cooling, daylight access, and low-carbon material options for the civic annex.",
+  "scheduled_offset_ms": 0,
+  "operation": "write",
+  "payload_schedule": [
+    {
       "scheduled_offset_ms": 0,
       "operation": "write",
-      "payload_schedule": [
-        {
-          "scheduled_offset_ms": 0,
-          "operation": "write",
-          "payload": "Review the massing concept and prioritize passive cooling, daylight access, and low-carbon material options for the civic annex."
-        },
-        {
-          "scheduled_offset_ms": 100,
-          "operation": "write",
-          "payload": "Evaluate the building's shape to maximize natural lighting, enhance passive ventilation, and select eco-friendly, low-embodied carbon materials for the new community center."
-        },
-        {
-          "scheduled_offset_ms": 200,
-          "operation": "write",
-          "payload": "Analyze the conceptual massing of the civic building to focus on sustainable material choices, access to natural daylight, and passive cooling techniques."
-        },
-        {
-          "scheduled_offset_ms": 300,
-          "operation": "write",
-          "payload": "Assess the architectural massing model with an emphasis on optimizing daylighting, natural cooling strategies, and specifying sustainable, low-carbon materials for the civic annex."
-        },
-        {
-          "scheduled_offset_ms": 400,
-          "operation": "write",
-          "payload": "Examine the overall geometry to improve natural lighting, natural cooling, and incorporate sustainable materials into the design of the civic annex."
-        },
-        {
-          "scheduled_offset_ms": 500,
-          "operation": "write",
-          "payload": "Critique the massing strategy for the civic annex, making sure to highlight low-carbon material selection, passive cooling opportunities, and daylight penetration."
-        }
-      ]
+      "payload": "Review the massing concept and prioritize passive cooling, daylight access, and low-carbon material options for the civic annex."
+    },
+    {
+      "scheduled_offset_ms": 50,
+      "operation": "write",
+      "payload": "Evaluate the building's shape to maximize natural lighting, enhance passive ventilation, and select eco-friendly, low-embodied carbon materials for the new community center."
+    },
+    {
+      "scheduled_offset_ms": 100,
+      "operation": "write",
+      "payload": "Analyze the conceptual massing of the civic building to focus on sustainable material choices, access to natural daylight, and passive cooling techniques."
+    },
+    {
+      "scheduled_offset_ms": 150,
+      "operation": "write",
+      "payload": "Assess the architectural massing model with an emphasis on optimizing daylighting, natural cooling strategies, and specifying sustainable, low-carbon materials for the civic annex."
+    },
+    {
+      "scheduled_offset_ms": 200,
+      "operation": "write",
+      "payload": "Examine the overall geometry to improve natural lighting, natural cooling, and incorporate sustainable materials into the design of the civic annex."
+    },
+    {
+      "scheduled_offset_ms": 250,
+      "operation": "write",
+      "payload": "Critique the massing strategy for the civic annex, making sure to highlight low-carbon material selection, passive cooling opportunities, and daylight penetration."
     }
+  ]
+}
