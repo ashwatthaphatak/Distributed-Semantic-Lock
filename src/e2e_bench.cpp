@@ -80,6 +80,8 @@ struct Config {
     float theta = 0.78f;
     int lock_hold_ms = 750;
     bool teardown_on_exit = false;
+    // When true, skip docker compose lifecycle (server is already running remotely).
+    bool skip_docker = false;
 };
 
 struct HttpResponse {
@@ -744,6 +746,26 @@ Config load_config() {
     }
     if (const char* teardown = std::getenv("E2E_TEARDOWN")) {
         config.teardown_on_exit = std::string(teardown) == "1";
+    }
+    if (const char* skip = std::getenv("E2E_SKIP_DOCKER")) {
+        config.skip_docker = std::string(skip) == "1";
+    }
+    if (const char* host = std::getenv("DSCC_SERVER_HOST")) {
+        const std::string h(host);
+        config.dscc_target = h + ":50050";
+        config.node_targets = {
+            h + ":50051",
+            h + ":50052",
+            h + ":50053",
+            h + ":50054",
+            h + ":50055",
+        };
+    }
+    if (const char* host = std::getenv("QDRANT_HOST")) {
+        config.qdrant_host = host;
+    }
+    if (const char* port = std::getenv("QDRANT_PORT")) {
+        config.qdrant_port = port;
     }
     return config;
 }
@@ -1832,8 +1854,10 @@ int main() {
         config = load_config();
         print_runtime_summary(config);
 
-        start_compose_stack(config);
-        stack_started = true;
+        if (!config.skip_docker) {
+            start_compose_stack(config);
+            stack_started = true;
+        }
 
         wait_for_http_service("Qdrant",
                               config.qdrant_host,
@@ -1876,22 +1900,22 @@ int main() {
         section_header("End-to-End Summary");
         if (overall_pass) {
             success("All real end-to-end scenarios passed.");
-            if (config.teardown_on_exit) {
+            if (!config.skip_docker && config.teardown_on_exit) {
                 stop_compose_stack(config);
             }
-            if (!config.teardown_on_exit) {
+            if (!config.skip_docker && !config.teardown_on_exit) {
                 info("Docker stack was left running for inspection. Use `docker compose down` when finished.");
             }
             return 0;
         }
 
-        if (config.teardown_on_exit) {
+        if (!config.skip_docker && config.teardown_on_exit) {
             stop_compose_stack(config);
         }
         error("One or more end-to-end scenarios failed.");
         return 1;
     } catch (const std::exception& ex) {
-        if (stack_started && config.teardown_on_exit) {
+        if (stack_started && !config.skip_docker && config.teardown_on_exit) {
             stop_compose_stack(config);
         }
         error(std::string("Fatal error: ") + ex.what());
