@@ -46,7 +46,7 @@ Make sure to replace <tailscale-IP-address> with Ayush's tailnet IP.
 To start the server and its components, run
 
 ```
-DSCC_LOCK_HOLD_MS=2 docker compose -f docker-compose.server.yml up
+DSCC_LOCK_HOLD_MS=30 docker compose -f docker-compose.server.yml up
 ```
 
 Start 5 terminals, one for each dscc-node.
@@ -119,6 +119,15 @@ docker start <same node that was killed>
 ## TEST CASE 5 (Ayush's machine on Projector)
 
 Before anything. Run `docker compose down`
-**ONLY TO BE RUN ON AYUSH's MACHINE**
 
 DSLM_GAUNTLET_THETA=0.75 E2E_TEARDOWN=0 ./build/dscc-paraphrase-gauntlet-demo
+
+
+
+## OPTIONAL TEST CASE 6 (Thundering Herd)
+
+DSCC_PROXY=<tailscale-IP-address>:50050 EMBEDDING_HOST=<tailscale-IP-address> locust -f locustfile_thundering_herd.py \
+    --autostart --autoquit 15 \
+    --web-host 0.0.0.0 --web-port 8089 \
+    -u 10 -r 10 --run-time 3m \
+    --host http://<tailscale-IP-address>:50050
