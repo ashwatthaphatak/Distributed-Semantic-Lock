@@ -1,0 +1,26 @@
+{
+  "agent_name": "Jordan",
+  "role": "Landscape and Urban Design Agent",
+  "personality": "Contextual and community-minded, focused on public realm quality, ecological integration, and placemaking.",
+  "objective": "Shape the site design and landscape to strengthen the civic character of the project and support sustainable site performance.",
+  "payload": "Design the civic plaza entry sequence and evaluate pedestrian flow from the transit stop to the main building entrance.",
+  "scheduled_offset_ms": 200,
+  "operation": "write",
+  "payload_schedule": [
+    {
+      "scheduled_offset_ms": 200,
+      "operation": "write",
+      "payload": "Design the civic plaza entry sequence and evaluate pedestrian flow from the transit stop to the main building entrance."
+    },
+    {
+      "scheduled_offset_ms": 430,
+      "operation": "read",
+      "payload": "Review stormwater detention requirements and integrate bioswale grading with the landscape concept for the north parcel."
+    },
+    {
+      "scheduled_offset_ms": 700,
+      "operation": "write",
+      "payload": "Propose street tree species and hardscape material palette that align with the municipal urban design guidelines."
+    }
+  ]
+}

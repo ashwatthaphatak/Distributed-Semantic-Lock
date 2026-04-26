@@ -1,18 +1,12 @@
-# Runs the distributed end-to-end stack: Ollama embeddings, Qdrant, five dscc nodes, and a leader-aware proxy.
-# e2e_bench.cpp brings this stack up before it starts scenario traffic.
+# Server-side stack for distributed demos: Qdrant + dscc nodes + proxy.
+# Run on the server machine; the client machine runs Ollama locally and the e2e_bench binary.
+# Usage: docker compose -f docker-compose.server.yml up -d
 
 services:
   qdrant:
     image: qdrant/qdrant
     ports:
       - "6333:6333"
-
-  embedding-service:
-    image: ${EMBEDDING_IMAGE:-${INFINITY_IMAGE:-ollama/ollama:latest}}
-    ports:
-      - "7997:11434"
-    volumes:
-      - ./.cache/ollama:/root/.ollama
 
   dscc-node-1:
     build:
@@ -37,7 +31,6 @@ services:
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-dscc_memory_e2e}
     depends_on:
       - qdrant
-      - embedding-service
     ports:
       - "50051:50051"
       - "50061:50061"
@@ -65,7 +58,6 @@ services:
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-dscc_memory_e2e}
     depends_on:
       - qdrant
-      - embedding-service
     ports:
       - "50052:50051"
       - "50062:50061"
@@ -93,7 +85,6 @@ services:
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-dscc_memory_e2e}
     depends_on:
       - qdrant
-      - embedding-service
     ports:
       - "50053:50051"
       - "50063:50061"
@@ -121,7 +112,6 @@ services:
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-dscc_memory_e2e}
     depends_on:
       - qdrant
-      - embedding-service
     ports:
       - "50054:50051"
       - "50064:50061"
@@ -149,7 +139,6 @@ services:
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-dscc_memory_e2e}
     depends_on:
       - qdrant
-      - embedding-service
     ports:
       - "50055:50051"
       - "50065:50061"

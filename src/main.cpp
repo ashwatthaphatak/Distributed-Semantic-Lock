@@ -5,11 +5,15 @@
 #include "lock_service_impl.h"
 #include "raft_node.h"
 #include "raft_service_impl.h"
+#include "threadsafe_log.h"
+
+#include "dscc_raft.pb.h"
 
 #include <grpcpp/grpcpp.h>
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <sstream>
@@ -114,6 +118,43 @@ int main() {
                       }
                   },
                   raft_config);
+    raft.SetLeaderChangeCallback([&lock_table, &raft, propose_timeout_ms, &node_id]() {
+        auto orphans = lock_table.begin_leader_sweep();
+        if (orphans.empty()) {
+            lock_table.end_leader_sweep();
+            log_line("[SWEEP " + node_id + "] no orphaned locks after leader change");
+            return;
+        }
+
+        log_line("[SWEEP " + node_id + "] releasing " +
+                 std::to_string(orphans.size()) +
+                 " orphaned lock(s) after leader change");
+
+        const auto timeout = std::chrono::milliseconds(propose_timeout_ms);
+        for (const auto& agent_id : orphans) {
+            if (!raft.IsLeader()) {
+                log_line("[SWEEP " + node_id + "] lost leadership, aborting sweep");
+                break;
+            }
+
+            dscc_raft::LogEntry release_entry;
+            release_entry.set_op_type(dscc_raft::LogEntry::RELEASE);
+            release_entry.set_agent_id(agent_id);
+
+            int64_t log_index = 0;
+            if (raft.Propose(release_entry, timeout, &log_index)) {
+                raft.WaitUntilApplied(log_index, timeout);
+                log_line("[SWEEP " + node_id + "] released orphan " + agent_id);
+            } else {
+                log_line("[SWEEP " + node_id + "] failed to release orphan " +
+                         agent_id);
+            }
+        }
+
+        lock_table.end_leader_sweep();
+        log_line("[SWEEP " + node_id + "] sweep complete");
+    });
+
     raft.Start();
 
     LockServiceImpl lock_service(&raft,

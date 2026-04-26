@@ -1,5 +1,21 @@
 # DSCC — Replicated Semantic Lock Manager: Complete Architecture Plan
 
+> **Implementation note (updated):** This plan was written for a 3-node cluster
+> with a Go gRPC proxy. The actual implementation diverges in two ways:
+>
+> 1. **5-node cluster.** The running system uses five `dscc-node` instances
+>    (quorum = 3, tolerates 2 failures) instead of three. All topology
+>    references, quorum arithmetic, and Docker Compose examples in this
+>    document still describe the original 3-node design.
+> 2. **C++ proxy instead of Go.** The proxy was implemented as a C++ gRPC
+>    service (`src/proxy_main.cpp`, `src/proxy_service_impl.cpp/.h`) built
+>    by the same CMake toolchain and Dockerfile as the nodes. There is no
+>    `proxy/` directory, no Go code, and no `Dockerfile.proxy`. All
+>    references to a Go proxy in §5, §12–§14 describe the original plan,
+>    not the shipped implementation.
+>
+> For the current authoritative state, see `STATE.md`.
+
 ---
 
 ## Table of Contents
