@@ -1,0 +1,2451 @@
+%%
+%% This is file `proposal.tex',
+%% generated for the ACM Configuration.
+%%
+\documentclass[sigconf]{acmart}
+
+%%
+%% \BibTeX command to typeset BibTeX logo in the docs
+\AtBeginDocument{%
+  \providecommand\BibTeX{{%
+    Bib\TeX}}}
+
+%% Rights management information.
+\setcopyright{none}
+\settopmatter{printacmref=false} % Removes citation information below abstract
+\renewcommand\footnotetextcopyrightpermission[1]{} % removes footnote with conference info
+
+%%
+%% end of the preamble, start of the body of the document source.
+\begin{document}
+
+%%
+%% The "title" command
+\title{Concurrency Control for Shared Memory\\ in Multi-Agent Systems}
+
+%%
+%% The "author" command and its associated commands
+\author{Ayush Gala}
+\email{agala2@ncsu.edu}
+\affiliation{%
+  \institution{North Carolina State University}
+  \city{Raleigh}
+  \state{North Carolina}
+  \country{USA}
+}
+
+\author{Ashwattha Phatak}
+\email{aaphatak@ncsu.edu}
+\affiliation{%
+  \institution{North Carolina State University}
+  \city{Raleigh}
+  \state{North Carolina}
+  \country{USA}
+}
+
+%%
+%% By default, the full list of authors will be used in the page headers.
+\renewcommand{\shortauthors}{Gala and Phatak}
+
+%%
+%% The abstract is a short summary of the work to be presented in the article.
+\begin{abstract}
+Large language model (LLM) multi-agent systems increasingly rely on shared vector databases for persistent memory. However, traditional distributed lock managers and concurrency control protocols (e.g., 2PL, OCC, MVCC) are structurally blind to "semantic race conditions," where multiple agents write semantically equivalent payloads expressed in different surface forms. Because these hazards cannot be detected by traditional key-based predicates, we present \textbf{DSCC} (Distributed Semantic Conflict Controller), a distributed lock manager that employs cosine similarity over embedding vectors as its conflict predicate. DSCC grants admission only when an incoming embedding lies below a calibrated similarity threshold $\theta$ relative to active locks, effectively serializing access based on meaning rather than naming.
+
+DSCC is implemented via a five-node Raft cluster featuring an \textbf{ActiveLockTable} that utilizes per-lock FIFO waiter deques and a cascading grant rebalancer to ensure fairness while eliminating thundering-herd wakeups. To maintain consistency during consensus, a two-phase admission protocol closes the race window between local admission and durable cluster agreement, preventing "ghost locks" during proposal failures. Evaluation across 13 benchmark scenarios reveals that the choice of embedding model is a critical architectural commitment; while smaller models like \textit{all-minilm} struggle with paraphrase conflicts, \textit{qwen3-embedding:0.6b} achieves a perfect serialization score. Sustaining 32~RPS throughput with a 10~ms median latency, DSCC demonstrates that semantic concurrency control is both feasible and performant for modern LLM-agent workflows.
+\end{abstract}
+
+%%
+%% CCS Concepts
+\begin{CCSXML}
+<ccs2012>
+   <concept>
+       <concept_id>10010147.10010178.10010219.10010220</concept_id>
+       <concept_desc>Computing methodologies~Multi-agent systems</concept_desc>
+       <concept_significance>500</concept_significance>
+   </concept>
+   <concept>
+       <concept_id>10002951.10002952.10002953.10002955</concept_id>
+       <concept_desc>Information systems~Database concurrency control</concept_desc>
+       <concept_significance>500</concept_significance>
+   </concept>
+   <concept>
+       <concept_id>10002951.10002952.10002953.10002956</concept_id>
+       <concept_desc>Information systems~Distributed database transactions</concept_desc>
+       <concept_significance>300</concept_significance>
+   </concept>
+   <concept>
+       <concept_id>10003752.10003809.10003716</concept_id>
+       <concept_desc>Theory of computation~Distributed algorithms</concept_desc>
+       <concept_significance>300</concept_significance>
+   </concept>
+   <concept>
+       <concept_id>10003752.10003809.10010044</concept_id>
+       <concept_desc>Theory of computation~Concurrent algorithms</concept_desc>
+       <concept_significance>300</concept_significance>
+   </concept>
+   <concept>
+       <concept_id>10010147.10010178.10010179</concept_id>
+       <concept_desc>Computing methodologies~Artificial intelligence</concept_desc>
+       <concept_significance>100</concept_significance>
+   </concept>
+</ccs2012>
+\end{CCSXML}
+
+\ccsdesc[500]{Computing methodologies~Multi-agent systems}
+\ccsdesc[500]{Information systems~Database concurrency control}
+\ccsdesc[300]{Information systems~Distributed database transactions}
+\ccsdesc[300]{Theory of computation~Distributed algorithms}
+\ccsdesc[300]{Theory of computation~Concurrent algorithms}
+\ccsdesc[100]{Computing methodologies~Artificial intelligence}
+
+%%
+%% Keywords
+\keywords{distributed concurrency control, semantic locking, multi-agent systems, vector databases, Raft consensus, embedding models, condition variables, FIFO fairness, CAP theorem}
+
+%%
+%% This command processes the author and affiliation and title information
+\maketitle
+
+\section{Introduction}
+\label{sec:intro}
+
+Large language model agents have moved from one-shot text generators to
+long-running, collaborating processes that read and write a persistent shared
+memory~\cite{park2023generative,langgraph,autogen}. In production
+deployments, this shared memory is almost always a \emph{vector
+database}~\cite{qdrant,weaviate,pinecone,pgvector}: each piece of knowledge is
+stored as a dense embedding vector, retrieved by approximate
+nearest-neighbor (ANN) search~\cite{faiss,hnswlib}, and read back into a
+prompt context. As soon as more than one agent shares such a store, a
+correctness question arises that has no precedent in classical concurrency
+control: \emph{how does the system prevent two agents from independently
+persisting the same piece of knowledge expressed in different words?}
+
+\paragraph{\textbf{A motivating example.}}
+Consider an architectural multi-agent system in which a sustainability agent
+writes the design note \emph{``prioritize passive cooling and low-carbon
+materials for the civic annex''}, while a parallel agent writes
+\emph{``evaluate daylight access and sustainable envelope decisions for the
+annex.''} Both sentences encode the same architectural design intent. In any
+modern vector store, however, they will be persisted as two distinct points,
+under two distinct numeric IDs, with two unrelated keys. No row, no key, no
+znode, no file in the system identifies them as a conflict. A subsequent
+retrieval will return both, downstream agents will reason over a corpus
+containing the same intent stated twice, and the resulting plan may
+double-count it, weight it twice, or---worst case---generate contradictory
+follow-on writes. This is a \emph{semantic race condition}: two writes whose
+embedding vectors satisfy $\cos(\mathbf{v}_A,\mathbf{v}_B)\ge\theta$ for some
+calibrated threshold~$\theta$, executed concurrently and admitted by every
+existing lock manager.
+
+\paragraph{\textbf{Why classical distributed locking does not apply.}}
+Chubby~\cite{chubby}, ZooKeeper~\cite{zookeeper}, etcd~\cite{etcd}, and
+Redlock~\cite{redlock} all serialize access to a \emph{lexical name}: a path
+in a hierarchical namespace, a znode, a key. Their conflict predicate is
+$\textsc{name}(r_A)=\textsc{name}(r_B)$. Because two paraphrases of the same
+intent receive different generated keys, they evaluate as non-conflicting and
+are permitted to proceed in parallel. No tuning, sharding, or hierarchical
+naming closes this gap; the conflict is a property of the payload's
+\emph{meaning}, not its identifier.
+
+\paragraph{\textbf{Why classical database concurrency control does not apply.}}
+Two-phase locking~\cite{gray1976granularity},
+optimistic concurrency control~\cite{kung1981optimistic}, and multi-version
+concurrency control~\cite{bernstein1983multiversion} all reduce conflict to
+shared physical resources: rows, pages, tuple identifiers, or write-sets
+expressed over those identifiers. Garcia-Molina and Salem's semantic
+concurrency control~\cite{garcia-molina1983} generalizes this to commutativity
+over abstract operations, but the operations and their commutativity table are
+specified by a database designer over structured types, not derived from
+unstructured natural-language content. None of these mechanisms have a
+predicate that can be evaluated against the meaning of an English sentence.
+
+\paragraph{\textbf{Key insight.}}
+A continuous embedding space, equipped with cosine similarity, already
+defines a workable conflict predicate: two payloads are in conflict
+when their embeddings are within a small angular distance. The technical
+problem is not how to compute this---transformer
+embedders~\cite{reimers2019sbert,bge,qwen3} produce such vectors as a
+byproduct of retrieval anyway---but how to embed it inside a fault-tolerant
+distributed lock manager whose admission control, fairness, and
+replication semantics remain sound. \emph{Cosine similarity over embeddings
+is a usable conflict predicate iff the lock manager itself is engineered
+around its non-binary, geometric nature.}
+
+\paragraph{\textbf{Contributions.}}
+This paper presents the design, implementation, and empirical evaluation of
+the \textbf{Distributed Semantic Conflict Controller} (DSCC), and makes the
+following contributions:
+
+\begin{enumerate}
+\item We formalize the \emph{semantic race condition} for shared agent
+  memory and define a cosine-similarity conflict predicate for distributed
+  lock management. We further define \emph{semantic serializability} and
+  the \emph{serialization score}---a recall-style metric that quantifies
+  the fraction of expected conflict pairs that were correctly ordered
+  (\S\ref{sec:problem}).
+
+\item We present the \textbf{ActiveLockTable}, a concurrent in-memory data
+  structure with $O(1)$ keyed lookup, per-lock FIFO waiter deques, and
+  per-waiter condition variables. We pair it with the
+  \emph{cascading grant rebalancer}, which scans a freshly orphaned waiter
+  deque front-to-back, migrates waiters to their new strongest blocker
+  when conflicts persist, and grants waiters whose conflict has cleared.
+  Together, these mechanisms eliminate thundering-herd wakeups while
+  preserving FIFO fairness within every conflict group
+  (\S\ref{sec:lock-table}).
+
+\item We integrate the lock table with a five-node Raft cluster via a
+  \emph{two-phase admission protocol}: a local pending-slot reservation
+  participates in conflict detection \emph{before} consensus, and a
+  Raft-committed APPLY callback promotes the slot to a real lock. We
+  identify a previously implicit failure mode---the \emph{ghost lock}---in
+  which a failed proposal leaves a stale reservation, and we close it with
+  a deterministic compensating-RELEASE path
+  (\S\ref{sec:raft}).
+
+\item We conduct an embedding model study across three open-weight models
+  and three threshold values---\(3\times3\times13=117\) case runs---and
+  show that \emph{model choice is architectural}: at $\theta{=}0.75$ on the
+  Paraphrase Gauntlet, all-minilm achieves only a 0.500 serialization
+  score, bge-m3 reaches 0.750, and qwen3-embedding:0.6b is the unique
+  combination that achieves a perfect 1.000. We characterize how
+  $\theta$~controls the trade-off between false positives (over-blocking)
+  and false negatives (missed races), and identify a stable operating
+  point (\S\ref{sec:embedding}).
+
+\item We evaluate the full system through 13 curated benchmark scenarios
+  and sustained Locust load, reporting end-to-end latency, fairness,
+  blocked rate, resource utilization, and CAP behavior. Under writes,
+  median latency is 10~ms and P95 is 68~ms---well below the
+  $2\times\textsc{heartbeat}=150$~ms heartbeat-driven upper bound,
+  indicating that most operations clear consensus in a single
+  AppendEntries cycle (\S\ref{sec:eval}).
+\end{enumerate}
+
+\paragraph{Roadmap.}
+\S\ref{sec:background} surveys distributed locking, database concurrency
+control, vector databases, multi-agent memory, Raft, and embedding models.
+\S\ref{sec:problem} formalizes the semantic conflict model.
+\S\ref{sec:arch} describes the system architecture and its four runtime
+layers. \S\ref{sec:raft} dissects the Raft consensus layer and the two-phase
+admission protocol. \S\ref{sec:lock-table} presents the ActiveLockTable in
+full, including the rebalancer and a correctness argument.
+\S\ref{sec:embedding} treats the embedding model as a first-class
+architectural component. \S\ref{sec:eval} reports the empirical evaluation.
+\S\ref{sec:limitations} discusses limitations and future work, and
+\S\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:background}
+
+DSCC sits at the intersection of four research traditions: distributed
+locking, database concurrency control, vector retrieval, and agent memory
+architectures. We review each and highlight the conceptual gap that DSCC is
+designed to fill, then summarize the Raft consensus protocol and the role of
+embedding models in defining the geometry of a lock space.
+
+\subsection{Distributed Locking Systems}
+\label{sec:bg-locking}
+
+\textbf{Chubby}~\cite{chubby} was the canonical distributed lock service:
+clients acquire coarse-grained advisory locks on named nodes in a tiny
+filesystem-like namespace, with a Paxos~\cite{paxos} replicated state
+machine guaranteeing that at most one client holds a lock at a time. The
+conflict predicate is identity equality on the lock path.
+\textbf{ZooKeeper}~\cite{zookeeper} generalized this to wait-free hierarchical
+coordination using ephemeral, sequenced \emph{znodes}; distributed mutexes,
+leader election, and barriers are built by applications on top, but the
+underlying conflict predicate remains lexical equality on a znode path.
+\textbf{etcd}~\cite{etcd} replaces this with a Raft-replicated key-value
+store and exposes leases and compare-and-swap on string keys.
+\textbf{Redlock}~\cite{redlock} relaxes consistency for availability: a lock
+is held when a majority of independent Redis instances have stored the
+same string key under TTL.
+
+These systems are mature and operationally invaluable, but their model of a
+conflict is structurally lexical: $\textsc{key}(r_A)=\textsc{key}(r_B)$.
+They cannot serialize two writes whose payloads encode the same intent under
+different keys, because they never look at the payload. DSCC retains the
+quorum-replicated lock-table architecture of these systems but replaces the
+predicate with cosine similarity over embedding vectors.
+
+\subsection{Database Concurrency Control}
+\label{sec:bg-cc}
+
+In relational databases, concurrency control mechanisms ensure
+serializability by reasoning about reads and writes over identified data
+items. \textbf{Two-phase locking}~\cite{gray1976granularity} acquires shared
+or exclusive locks on rows, pages, or tables, in a strictly two-phase
+acquire-then-release order. \textbf{Optimistic concurrency
+control}~\cite{kung1981optimistic} validates a transaction's read- and
+write-sets at commit time, aborting any transaction whose read-set
+intersects a committed write-set. \textbf{Multi-version concurrency
+control}~\cite{bernstein1983multiversion} keeps per-transaction snapshots
+indexed by primary key, so reads do not block writes. In every case, the
+conflict predicate reduces to set intersection over identifiers.
+\textbf{Semantic concurrency control}~\cite{garcia-molina1983} introduced
+the idea that two operations may run concurrently if their effects commute,
+but commutativity is specified declaratively over a designer-supplied
+operation algebra (e.g., increment, decrement, push, pop) and is undefined
+for free-form natural-language content.
+
+DSCC operates in a regime where the conflicting items do not have a shared
+identifier and may not even share a vocabulary: two paraphrases of the same
+sentence are physically distinct points in a vector store. We therefore need
+a predicate that operates on the geometric \emph{representation} of the
+payload rather than on its identity, and we need it to be evaluable in
+real time on the admission path.
+
+\subsection{Vector Databases and ANN Search}
+\label{sec:bg-vec}
+
+Vector databases such as \textbf{Qdrant}~\cite{qdrant},
+\textbf{Weaviate}~\cite{weaviate}, \textbf{Pinecone}~\cite{pinecone}, and the
+\textbf{pgvector}~\cite{pgvector} extension to PostgreSQL store dense
+embedding vectors alongside scalar payloads and support fast approximate
+nearest-neighbor retrieval. Two indexing families dominate: graph-based
+\textbf{HNSW}~\cite{hnswlib}, which builds a hierarchical navigable
+small-world graph and answers $k$-NN queries in expected logarithmic time,
+and quantization-based \textbf{FAISS}~\cite{faiss} indexes (IVF, IVF-PQ,
+HNSW-PQ), which trade exact distance for memory by partitioning the space
+and quantizing vectors. Both families optimize \emph{retrieval}, not
+\emph{admission}: their concurrency abstractions stop at the collection
+level, with point-level upserts treated as independent. None of them detect
+that two concurrent upserts encode the same intent. DSCC complements the
+vector database rather than replacing it: Qdrant remains the durable
+store, while DSCC sits in front of every write and decides whether
+admission is safe.
+
+\subsection{Multi-Agent Memory Architectures}
+\label{sec:bg-agents}
+
+Modern agent frameworks delegate memory consistency entirely to the
+underlying store. \textbf{LangGraph}~\cite{langgraph} models agent flows as
+graphs of nodes with shared state; concurrent state updates are reconciled
+either by last-writer-wins or by user-supplied reducers, neither of which
+can detect semantic duplicates. \textbf{AutoGen}~\cite{autogen} composes
+LLM agents through conversation patterns and provides no memory-write
+arbitration. \textbf{Generative Agents}~\cite{park2023generative}
+demonstrated that long-running simulated agents benefit from a shared
+``observation memory'' but ran a single observation pipeline, sidestepping
+the multi-writer problem. \textbf{ReAct}~\cite{yao2023react} and similar
+single-agent reasoning architectures assume a single thread of control. As
+soon as agents are scaled out across multiple processes or hosts, all
+of these frameworks are exposed to the semantic race condition we address.
+
+\subsection{Raft Consensus}
+\label{sec:bg-raft}
+
+Raft~\cite{raft} is a consensus protocol designed for understandability,
+implementing the same safety guarantees as Paxos~\cite{paxos} through a
+strong leader and an explicit log abstraction. Cluster nodes are in one of
+three states---\textsc{follower}, \textsc{candidate}, or \textsc{leader}.
+Time is divided into terms, each with at most one leader. \textbf{Leader
+election} is triggered by an election timeout; a candidate increments the
+current term, votes for itself, and solicits votes from peers. A vote is
+granted iff the candidate's log is at least as up-to-date as the voter's
+(by last-log-term, then last-log-index) and the voter has not voted in this
+term. \textbf{Log replication} proceeds via \texttt{AppendEntries} RPCs from
+the leader, each carrying the term, the index and term of the immediately
+prior entry, and a batch of new entries. A follower accepts a batch iff its
+local log matches at the prior index and term, otherwise it rejects with a
+hint index that lets the leader back up efficiently. \textbf{Commitment} is
+defined by quorum: an entry is committed when it has been replicated to a
+majority \emph{and} the leader has at least one entry from its current
+term in the log---this prevents the well-known ``Raft figure 8'' anomaly
+in which a stale entry is incorrectly counted as durable.
+
+DSCC implements its own Raft layer (rather than using etcd or hashicorp/raft)
+to obtain tight integration with the lock table's APPLY callback. We inherit
+Raft's safety guarantees---at most one leader per term, log matching,
+leader completeness---and add to it (i) a deterministic APPLY callback into
+\texttt{ActiveLockTable} that promotes pending slots into real locks, and
+(ii) the orchestration logic surrounding the two-phase admission protocol.
+We deliberately accept several known engineering simplifications (sequential
+vote collection, no pre-vote) and discuss their implications
+in \S\ref{sec:raft-limit} and \S\ref{sec:limitations}.
+
+\subsection{Embedding Models for Semantic Similarity}
+\label{sec:bg-embed}
+
+A modern embedding model is a transformer encoder fine-tuned with a
+contrastive objective so that semantically equivalent sentences map to
+vectors with high cosine similarity. Sentence-BERT~\cite{reimers2019sbert}
+established the recipe; subsequent models such as
+\textbf{BGE}~\cite{bge}, \textbf{E5}~\cite{e5}, and the
+\textbf{Qwen3}~\cite{qwen3} embedding family scale capacity and
+multilingual coverage. Cosine similarity in this space approximates
+\emph{semantic equivalence}: paraphrases cluster, synonyms cluster, and
+unrelated sentences spread out. The geometry of the resulting space, however,
+is a property of the model. A small, distilled encoder collapses
+paraphrases into vectors that are similar enough for human inspection but
+not similar enough to clear a high cosine threshold. A larger encoder
+preserves finer angular distinctions and produces tighter paraphrase
+clusters but is slower to evaluate.
+
+For DSCC, this means the embedding model is not an interchangeable
+component: it \emph{is} the conflict predicate. \S\ref{sec:embedding}
+quantifies how dramatically model choice alters the semantics of the lock
+space, and identifies the only model in our study that yields a
+zero-violation operating point.
+
+\paragraph{\textbf{Summary.}} The four research traditions surveyed above each
+contribute one piece of the puzzle---fault-tolerant replicated locking from
+distributed systems, principled admission control from databases, dense
+retrieval geometry from vector stores, and consensus from
+Raft---but none combine them in a way that detects semantic conflicts on
+the admission path. The remainder of the paper presents that combination.
+
+
+\section{Problem Formulation}
+\label{sec:problem}
+
+We formalize the system model, the semantic conflict predicate, the
+resulting race condition, and a notion of semantic serializability that we
+use as the primary correctness criterion in evaluation.
+
+\subsection{System Model}
+\label{sec:model}
+
+We assume a set of $n$ \emph{agents} $\mathcal{A}=\{a_1,\dots,a_n\}$, each
+running as an independent process and writing through DSCC to a shared
+\emph{vector database} $\mathcal{D}$. Agents communicate with DSCC through
+gRPC and otherwise share no state. Each write request~$r$ carries a
+natural-language payload $s_r\in\Sigma^*$ over an unspecified alphabet.
+
+A deterministic \emph{embedding function}
+$\textsc{Embed}:\Sigma^*\!\to\mathbb{R}^d$ maps a payload to a fixed-dimension
+unit-normalized vector $\mathbf{v}_r=\textsc{Embed}(s_r)$. We treat
+\textsc{Embed} as a black box supplied by the deployment (see
+\S\ref{sec:embedding}); it is the same function for every agent in a
+deployment, and we assume that a small numerical drift due to
+floating-point non-determinism is below the threshold sensitivity bands we
+calibrate in \S\ref{sec:embedding}.
+
+Time is partitioned into a logical event sequence per agent. An agent issues
+each request to DSCC's leader-aware proxy, which forwards it to the current
+Raft leader; the leader returns an \texttt{AcquireResponse} that records,
+among other timestamps, $\textsc{lock}_\textrm{acq}(r)$ and
+$\textsc{lock}_\textrm{rel}(r)$ delimiting the lock-hold interval. The
+agent's persistence operation against $\mathcal{D}$ is bracketed inside this
+interval. \textbf{We assume crash-stop failures of nodes (no Byzantine behavior)
+and a partially synchronous network with bounded but unknown delay; this is
+the standard Raft assumption.}
+
+\subsection{Semantic Conflict}
+\label{sec:semantic-conflict}
+
+Two requests $r_A$ and $r_B$ with embeddings $\mathbf{v}_A,\mathbf{v}_B\in
+\mathbb{R}^d$ are \emph{semantically conflicting at threshold~$\theta$} iff
+\begin{equation}
+  \cos(\mathbf{v}_A,\mathbf{v}_B)
+  \;=\;\frac{\mathbf{v}_A\cdot\mathbf{v}_B}{\|\mathbf{v}_A\|\,\|\mathbf{v}_B\|}
+  \;\ge\;\theta,
+  \label{eq:conflict}
+\end{equation}
+where $\theta\in(0,1]$ is a deployment-calibrated parameter. The numerator
+is the standard Euclidean dot product and the denominator the product of
+$\ell_2$ norms; cosine therefore measures the angle between the two vectors
+independent of magnitude. Geometrically, $\theta$ defines a
+\emph{spherical cap} centered at $\mathbf{v}_A/\|\mathbf{v}_A\|$ on the
+unit sphere $S^{d-1}$; any point inside the cap is in conflict.
+Semantically, $\theta$ controls how aggressively paraphrases are detected:
+high $\theta$ (e.g.\ $0.95$) requires near-identical phrasing; low $\theta$
+(e.g.\ $0.55$) flags broadly related ideas.
+
+The threshold is \emph{not} an absolute semantic boundary that holds across
+deployments. It is a parameter calibrated against the geometry produced by
+the chosen embedding model on the chosen workload. In our evaluation
+(\S\ref{sec:embedding}), we sweep $\theta\in\{0.55,0.75,0.95\}$ and show
+that the same nominal value yields very different operating points across
+models.
+
+\paragraph{\textbf{Threshold asymmetry.}}
+The conflict check in DSCC always uses the \emph{incoming} request's
+$\theta$, not the active lock's $\theta$. A conservative request
+($\theta_\textrm{in}=0.55$) may therefore be blocked by an active lock that
+itself was acquired with $\theta_\textrm{lock}=0.95$ even though the active
+lock would not have considered the new request a conflict. We adopt this
+asymmetric semantics deliberately so that a single conservative client can
+protect itself without requiring all peers to lower their thresholds; the
+trade-off is discussed in \S\ref{sec:limitations}.
+
+\subsection{Semantic Race Condition}
+\label{sec:race}
+
+A \emph{semantic race condition} occurs when two semantically conflicting
+requests $r_A,r_B$ have overlapping lock-hold intervals \\
+$[\textsc{lock}_\textrm{acq}(r_A),\textsc{lock}_\textrm{rel}(r_A)]\cap
+[\textsc{lock}_\textrm{acq}(r_B),\textsc{lock}_\textrm{rel}(r_B)]\neq\emptyset$. \\
+Concretely, both writes commit to $\mathcal{D}$ without an enforced ordering;
+$\mathcal{D}$ ends up with two duplicate-intent points, downstream readers
+observe both, and any reasoning over the corpus is corrupted by the
+duplication. The duplication is permanent because vector stores have no
+notion that the two points are conflicts: a deduplication pass would
+itself need to re-embed and threshold-compare, which is precisely the
+predicate DSCC enforces on admission.
+
+\paragraph{\textbf{Concrete example.}} Agent~A submits the payload \emph{``review
+the massing concept and prioritize passive cooling, daylight access, and
+low-carbon material options for the civic annex''}; Agent~B, simultaneously,
+submits \emph{``re-examine the early massing study with an emphasis on
+sustainable envelope decisions and reduced embodied carbon for the annex
+program.''} Both encode the same architectural design intent. A high-quality
+embedder maps them to vectors with $\cos\approx 0.83$. At $\theta{=}0.75$,
+Equation~\ref{eq:conflict} flags this pair as a conflict. Without DSCC,
+both requests reach Qdrant with distinct numeric IDs; the two points
+co-exist forever. With DSCC, the second request is queued behind the first
+on a per-lock waiter deque (\S\ref{sec:lock-table}) and only proceeds after
+the first releases. Crucially, no key-based mechanism---neither row IDs in
+PostgreSQL, nor znode paths in ZooKeeper, nor IDs in Qdrant---can detect
+this pair, because no key is shared.
+
+\subsection{Semantic Serializability and the Serialization Score}
+\label{sec:semantic-ser}
+
+A request schedule is \emph{semantically serializable at $\theta$} iff,
+for every pair of requests that would conflict at $\theta$, one's
+lock-hold interval ends strictly before the other's begins. Equivalently,
+the conflict graph induced by Equation~\ref{eq:conflict} is correctly
+serialized.
+
+We measure how close a run comes to this ideal with the
+\emph{serialization score}:
+\begin{equation}
+  \textsc{ss}(\theta)
+  \;=\;1\;-\;
+  \frac{\textsc{violations}(\theta)}{\textsc{conflict\_pairs}(\theta)},
+  \label{eq:serscore}
+\end{equation}
+where
+\(\textsc{conflict\_pairs}(\theta)=\bigl|\{(r_A,r_B):
+\cos(\mathbf{v}_A,\mathbf{v}_B)\ge\theta\}\bigr|\) is the count of pairs
+the predicate flags as conflicting, and \(\textsc{violations}(\theta)\) is
+the count of those pairs whose lock-hold intervals nevertheless overlap.
+\(\textsc{ss}=1.000\) means zero semantic race conditions were observed in
+the run; \(\textsc{ss}=0\) means the system effectively does not
+serialize at all. We treat \(\textsc{ss}\) as a recall metric: any
+violation is a missed safety case.
+
+A complementary metric is the \emph{distinct parallelism rate}, which
+counts what fraction of the pairs that should \emph{not} conflict actually
+ran in parallel. Maximizing parallelism on distinct pairs while pinning
+\(\textsc{ss}=1.000\) is the central correctness--throughput trade-off
+explored in \S\ref{sec:embedding}.
+
+\subsection{Design Goals}
+\label{sec:goals}
+
+DSCC is designed against four explicit goals:
+
+\begin{enumerate}
+\item \textbf{Correctness}---semantic serializability:
+\(\textsc{ss}(\theta_\textrm{calibrated})=1.000\) on the Paraphrase Gauntlet.
+
+\item \textbf{Parallelism}---distinct, non-conflicting writes execute
+concurrently: distinct parallelism rate $\to1$ on the Cross-Domain Flood at
+the calibrated $\theta$.
+
+\item \textbf{Fairness}---FIFO ordering within every conflict group:
+admission of two waiters $w_i,w_j$ on the same lock with $i$ enqueued before
+$j$ implies $w_i$ acquires before $w_j$, even across rebalances; we
+verify this through queue-position and queue-hop trace fields exposed in
+each \texttt{AcquireResponse}.
+
+\item \textbf{Fault tolerance}---a five-node Raft cluster with
+$\textsc{quorum}=3$ tolerates the simultaneous failure of any two nodes
+without loss of admitted-lock state; this is the standard safety property
+we inherit directly from Raft.
+\end{enumerate}
+
+These goals frame the architecture, the lock-table design, and the
+evaluation that follow.
+%% =====================================================================
+\section{System Architecture}
+\label{sec:arch}
+
+% TODO - Add system architecture figure here
+%   \caption{End-to-end DSCC architecture. Agents embed payloads through
+%     Ollama, then send \texttt{AcquireGuard} to the leader-aware proxy,
+%     which forwards to the current Raft leader. The leader runs admission
+%     against the ActiveLockTable, replicates the decision to four followers
+%     (dashed arrows = AppendEntries), and only after commit performs the
+%     Qdrant write.}
+%   \label{fig:arch}
+% \end{figure}
+
+
+% TODO - Fix this reference to the architecture figure after adding the figure above.
+DSCC is built as four cleanly separated runtime layers, all communicating
+over gRPC: (1) the \emph{embedding service}, (2) the \emph{leader-aware
+proxy}, (3) the \emph{five-node DSCC cluster}, and (4) the \emph{Qdrant
+vector database} (Figure~\ref{fig:arch}). The separation is functional, not
+just deployment-level: each layer has a well-defined responsibility, a
+narrow gRPC contract, and an independent failure mode. We discuss each in
+turn after walking through the full data flow for a single write.
+
+\paragraph{\textbf{End-to-end data flow for a single write.}}
+\begin{enumerate}
+\item The agent reads its payload (e.g., from a JSON template in
+  \texttt{demo\_inputs/}) and issues an HTTP POST to the embedding service
+  with the chosen model name. The service returns a $d$-dimensional vector.
+\item The agent constructs a gRPC \texttt{AcquireRequest} containing
+  \texttt{agent\_id}, the embedding, the raw payload text (for telemetry),
+  the operation type (\textsc{write} or \textsc{read}), and a client
+  timestamp. It sends the RPC to \texttt{dscc-proxy} on port 50050.
+\item The proxy looks up its cached leader address and forwards the request
+  via \texttt{ForwardWithLeaderRetry}. On \texttt{NOT\_LEADER}, the proxy
+  refreshes its leader cache and retries up to three times within the
+  request deadline.
+\item The leader's \texttt{LockServiceImpl::AcquireGuard} handler runs the
+  three-phase protocol (\S\ref{sec:two-phase}): admission against the
+  ActiveLockTable, Raft \textsc{acquire} consensus, and APPLY-callback
+  promotion of the pending slot. It then performs the actual Qdrant
+  \texttt{PUT /collections/\{col\}/points?wait=true} (or, for reads,
+  \texttt{POST .../points/search}).
+\item After the Qdrant write, the leader proposes a Raft
+  \textsc{release} entry; on commit, every node's APPLY callback removes
+  the lock from its local table, and the leader's \\
+  \texttt{rebalance\_waiters\_locked} hands granted waiters their per-CV
+  notifications. The agent's gRPC response carries every timestamp in the
+  pipeline plus a trace block (\texttt{wait\_position},
+  \texttt{queue\_hops}, \texttt{wake\_count}, \texttt{blocking\_similarity}, \\
+  \texttt{blocking\_agent\_id}, \texttt{active\_lock\_count}) for offline
+  analysis.
+\end{enumerate}
+
+\paragraph{\textbf{Failure handling at the architectural level.}}
+A leader change interrupts in-flight requests at the gRPC layer; the proxy
+observes \texttt{UNAVAILABLE} or \texttt{NOT\_LEADER}, refreshes the leader
+cache via \texttt{GetLeader}, and retries. A network partition that strands
+the leader in a minority causes its proposals to never reach quorum;
+\texttt{Propose} times out, the handler appends a compensating
+\textsc{release} via \texttt{AppendLocalEntry} (\S\ref{sec:ghost}), and
+returns \texttt{UNAVAILABLE}. A node failure inside a healthy majority is
+absorbed by Raft replication: as long as $\textsc{quorum}=3$ acknowledges
+each entry, progress continues. On rejoin, the failed node catches up via
+backward-walking \texttt{AppendEntries} with the fast conflict-index hint.
+
+\paragraph{\textbf{Deployment topology.}}
+The full stack is described by a single \texttt{docker-compose.yml}: one
+Qdrant container (port 6333), one Ollama container (host:7997 →
+container:11434), five \texttt{dscc-node} containers (each exposing
+\texttt{50051+i} for the client gRPC service and \texttt{50061+i} for
+the inter-node Raft service), and one \texttt{dscc-proxy} container (port
+50050). Containers are network-isolated and each runs the same image, with
+behavior parameterized through environment variables (theta, lock-hold
+duration, Raft timeouts). This topology was chosen to enforce that
+\emph{node-to-node communication uses the same gRPC stack as
+client-to-leader communication}: there is no shortcut for replication, and
+no in-process binding lets Raft messages bypass the on-the-wire path. The
+identical deployment is used for the e2e benchmark, the Locust load tests,
+and the live demo, so all measured numbers reflect realistic gRPC latency.
+
+\subsection{Embedding Service (Ollama)}
+\label{sec:emb-service}
+
+The embedding service is an Ollama instance that exposes the OpenAI-compatible
+\texttt{/v1/embeddings} endpoint. A single container hosts all three models
+(\texttt{all-minilm}, \texttt{bge-m3}, \texttt{qwen3-embedding:0.6b});
+agents and benchmark drivers select a model per request via the
+\texttt{model} field. Model weights are cached in a Docker volume so cold
+starts only happen on first run.
+
+\paragraph{\textbf{Why a separate service?}}
+The architectural goal is that \emph{the lock table never interprets natural
+language}. The \texttt{AcquireRequest} carries a vector and a scalar
+threshold; the lock table compares floats. This clean separation has three
+benefits. First, the embedding model can be replaced at deployment time
+without recompiling the lock manager---the embedding study in
+\S\ref{sec:embedding} is conducted entirely by changing the model name
+passed in each request. Second, embedding latency (10--133~ms p50) is
+incurred on the agent side, before the gRPC call, so the leader's hot path
+is not lengthened by tokenization or inference. Third, swapping the
+embedder for a future modality (e.g., a multimodal encoder for image
+payloads) is a configuration change, not a redesign.
+
+\subsection{Leader-Aware Proxy}
+\label{sec:proxy}
+
+The proxy (\texttt{src/proxy\_main.cpp},
+\texttt{src/proxy\_service\_impl.cpp}) is a stateless C++ gRPC server that
+sits in front of the cluster on port 50050. Three concerns motivate its
+existence: (i) clients should not have to discover the current Raft leader
+themselves; (ii) leader changes should not surface as application-level
+errors; (iii) gRPC channels to backend nodes should be reused across requests
+to avoid TCP/TLS handshake costs.
+
+\paragraph{\textbf{Leader poll loop and caching.}}
+A dedicated thread runs \\ \texttt{LeaderPollLoop}, which calls
+\texttt{RaftService::GetLeader} on every backend every
+\texttt{LEADER\_POLL\_MS}=100~ms. \texttt{GetLeader} returns either
+``I am leader'' or ``the current leader is at \texttt{addr}''; the first
+response of either kind that arrives within
+\texttt{LEADER\_RPC\_TIMEOUT\_MS}=750~ms wins, and the cached leader address
+is updated atomically. The poll interval and the heartbeat interval
+(75~ms) are deliberately mismatched so that the proxy's view converges to
+the cluster's leader within a few election timeouts even under
+heartbeat-rate churn.
+
+\paragraph{\textbf{Forwarding and retry.}}
+\texttt{ForwardWithLeaderRetry<T>(req, rpc)} is a templated helper that
+loops up to three times: it (a) ensures a cached leader exists, refreshing
+if stale; (b) creates a \texttt{LockService::Stub} on the cached channel;
+(c) calls \texttt{rpc} with a per-attempt deadline of
+\texttt{REQUEST\_TIMEOUT\_MS}=35~s. On success it returns. On
+\texttt{FAILED\_PRECONDITION} carrying ``NOT\_LEADER'', the proxy reads
+the \texttt{leader-address} trailing-metadata key, replaces its cached
+leader with that hint, and retries. On \texttt{UNAVAILABLE} or
+\texttt{DEADLINE\_EXCEEDED}, it forces a leader refresh and retries.
+After three failures, the original status is propagated to the client.
+
+\paragraph{\textbf{Lazy channel creation.}}
+gRPC channels are stored in an \\ \texttt{unordered\_map<string,
+shared\_ptr<Channel>>}. A channel to a backend is created on first use
+and never closed; subsequent requests to the same backend reuse it.
+This means a leader flip only requires the proxy to switch which channel
+it dials---there is no reconnection cost, just a different stub on an
+existing channel.
+
+\paragraph{\textbf{Why a proxy at all?}}
+Without the proxy, every client SDK would need to embed leader-discovery
+logic, plus retry-on-redirect, plus channel caching. By centralizing
+these concerns in a single C++ binary, we keep clients simple
+(single endpoint, no Raft awareness) and we make the discovery latency a
+property of the cluster rather than of each client. The proxy is itself
+stateless aside from its in-memory leader cache, so it can be replicated
+horizontally behind a TCP load balancer without coordination.
+
+\subsection{The DSCC Cluster}
+\label{sec:cluster}
+
+Each of the five \texttt{dscc-node} processes runs an identical binary
+that wires together a \texttt{RaftNode}, an \texttt{ActiveLockTable}, a
+\texttt{LockServiceImpl} (the gRPC handler for client requests), and a
+\texttt{RaftServiceImpl} (the gRPC handler for inter-node Raft RPCs). The
+node listens on two ports: 50051 for clients and 50061 for peers.
+
+\paragraph{Leader-only operations.}
+\texttt{AcquireGuard} and \texttt{ReleaseGuard} are leader-only.
+A non-leader handler immediately returns \\
+\texttt{FAILED\_PRECONDITION} with the leader address in trailing metadata.
+The proxy interprets this as a redirect. We chose strict leader-only
+admission rather than follower forwarding because admission requires
+running \\ \texttt{wait\_for\_admission}, which mutates the lock table; running
+this on followers would either require synchronous round-trips on the
+admission path (defeating the purpose of replication) or would create races
+with Raft APPLY ordering. Read-only operations would be a candidate for
+follower service, but the current implementation routes them through the
+leader as well, since reads also pass through the semantic admission
+predicate (\S\ref{sec:limitations}).
+
+\paragraph{State replication and consistency.}
+The lock table on each node is rebuilt from the same Raft log via the
+\texttt{on\_commit\_} callback: \texttt{ACQUIRE} entries trigger
+\texttt{apply\_acquire}, \texttt{RELEASE} entries trigger
+\texttt{apply\_release}. Because Raft guarantees that all nodes apply the
+log in the same total order, every node's lock table converges to the same
+state at the same commit index. The leader's table additionally contains
+\emph{pending} slots for in-flight admissions; followers see only
+committed locks.
+
+\paragraph{Forward pointer.}
+\S\ref{sec:raft} dissects the Raft consensus layer and shows how the
+two-phase admission protocol, the pending-slot mechanism, and the ghost-lock
+prevention path together close the race window between local admission and
+durable cluster agreement. \S\ref{sec:lock-table} then dissects the
+ActiveLockTable in detail.
+
+%% =====================================================================
+\section{Raft Consensus Layer}
+\label{sec:raft}
+
+Raft replicates the lock-table mutations across the five-node cluster and
+produces the strict total order that the APPLY callback requires. We
+describe the cluster configuration and threading model, the two-phase
+admission protocol, the pending-slot mechanism that closes the
+admission/consensus race, the ghost-lock prevention path, the release
+protocol, and the engineering simplifications we knowingly accepted.
+
+\subsection{Cluster Configuration and Threading Model}
+\label{sec:cluster-config}
+
+The cluster has $N{=}5$ nodes, $\textsc{quorum}=3$, and tolerates two
+simultaneous failures. Each node runs three background threads on top of
+the gRPC server thread pool:
+
+\begin{itemize}
+\item \texttt{HeartbeatLoop} (75~ms period). On the leader, it spawns one
+  thread per peer per round and issues \texttt{AppendEntries} (with or
+  without entries) to keep the followers' election timers reset and to
+  drive replication.
+\item \texttt{ElectionTimerLoop} (10~ms poll, 600--1000~ms randomized
+  deadline). On non-leaders, if no \texttt{AppendEntries} has arrived
+  before the deadline, the loop transitions the node to \textsc{candidate}
+  and starts an election.
+\item \texttt{ApplyLoop}. Waits on \texttt{apply\_cv\_} for
+  \texttt{last\_applied\_} $<$ \texttt{commit\_index\_}; on each iteration,
+  pops the next entry, calls the registered \texttt{on\_commit\_}
+  callback, and signals back.
+\end{itemize}
+
+\paragraph{\textbf{Rationale for the timing parameters.}}
+The 75~ms heartbeat sets the floor on commit latency: a write incurs at
+least one heartbeat round-trip on the critical path, plus replication
+RPCs. A faster heartbeat reduces commit latency but increases idle CPU
+and network usage; 75~ms is a standard mid-point used in production Raft
+deployments such as etcd and works well for our local-network
+testbed. The 600--1000~ms randomized election timeout is approximately
+$8\times$ the heartbeat---enough that a single dropped heartbeat does not
+trigger an election, but small enough that a leader failure is detected
+within a second. The 150~ms per-RPC timeout is short enough that a
+hung peer does not wedge a heartbeat round, and long enough that a healthy
+local network never spuriously times out.
+
+\subsection{Two-Phase Admission Protocol}
+\label{sec:two-phase}
+
+A successful \texttt{AcquireGuard} call traverses three phases: an
+\textsc{Admission} phase that runs locally against the lock table, a
+\textsc{Consensus} phase that replicates the decision through Raft, and a
+\textsc{Promotion} phase that fires on every node via the APPLY callback.
+% Algorithm~\ref{alg:two-phase} captures the leader-side flow.
+
+% \begin{algorithm}[t]
+% \small
+% \caption{Leader-side \texttt{AcquireGuard} (annotated)}
+% \label{alg:two-phase}
+% \begin{algorithmic}[1]
+% \Function{AcquireGuard}{$\textit{req}$}
+%   \If{$\neg \textsc{IsLeader}()$} \Comment{redirect via metadata}
+%     \State \Return $\textsc{FailedPrecondition}(\texttt{NOT\_LEADER})$
+%   \EndIf
+%   \State \textbf{Phase 1 — Admission} \Comment{local CV wait, pending slot}
+%   \State $\textit{trace} \gets
+%         \textsc{LockTable.WaitForAdmission}(\textit{req})$
+%   \State \textbf{Phase 2 — Consensus} \Comment{durable Raft commit}
+%   \State $\textit{idx} \gets
+%         \textsc{Raft.Propose}(\textsc{Acquire},\textit{req},
+%         \textit{timeout})$
+%   \If{$\textit{idx} = \bot$ \textbf{or}
+%        $\neg \textsc{Raft.WaitUntilApplied}(\textit{idx},\textit{timeout})$}
+%     \State \textsc{LockTable.RemovePending}(\textit{req}.agent\_id)
+%     \State \textsc{Raft.AppendLocalEntry}(\textsc{Release},\textit{req})
+%     \Comment{ghost cleanup}
+%     \State \Return $\textsc{Unavailable}$
+%   \EndIf
+%   \State \textbf{Phase 3 — Promotion (via APPLY callback)}
+%   \State \quad // \texttt{apply\_acquire} clears pending=true
+%   \State \textbf{Qdrant write/read}
+%   \State \textsc{CommitRelease}(\textit{req})
+%   \State \Return $\textsc{Granted}(\textit{trace})$
+% \EndFunction
+% \end{algorithmic}
+% \end{algorithm}
+
+\paragraph{\textbf{Phase 1 — Admission.}}
+The handler validates the request and calls
+\texttt{lock\_table\_->wait\_for\_admission(agent\_id, embedding, theta)}
+(Algorithm~\ref{alg:two-phase} line~6). This call blocks the calling
+gRPC worker thread inside a per-waiter condition variable until no active
+or pending lock conflicts with the incoming embedding. On clearance, it
+\emph{atomically} inserts a \emph{pending slot}: a \texttt{SemanticLock}
+entry with \texttt{pending=true}. The slot participates in subsequent
+conflict scans (\S\ref{sec:pending}) but is not yet replicated.
+
+\paragraph{\textbf{Phase 2 — Consensus.}}
+The handler builds a \texttt{LogEntry\{op=ACQUIRE, agent\_id, embedding,
+theta, term\}} and calls \texttt{raft\_->Propose(entry, timeout,
+\&idx)}. \texttt{Propose} appends the entry to the local log, then enters
+a parallel-replication loop: one thread per peer issues
+\texttt{AppendEntries} with the new entry; after each RPC, the leader
+advances \texttt{commit\_index\_} if a quorum of \texttt{match\_index\_}
+values has caught up \emph{and} the entry's term matches
+\texttt{current\_term\_}. The handler then calls
+\texttt{raft\_->WaitUntilApplied(idx, timeout)}, which blocks on
+\texttt{apply\_cv\_} until \texttt{last\_applied\_} reaches \texttt{idx}.
+\textsc{Propose} or \textsc{WaitUntilApplied} returning false indicates a
+failed consensus---either the leader stepped down, the network split, or a
+peer is too far behind. The handler then takes the ghost-cleanup branch
+(lines 9--11).
+
+\paragraph{\textbf{Phase 3 — Promotion.}}
+On commit, every node's \texttt{ApplyLoop} eventually pops the entry and
+fires \texttt{on\_commit\_} (registered in \texttt{main.cpp}). On the
+leader, \texttt{apply\_acquire} \emph{finds the existing pending entry by
+\texttt{agent\_id}}, sets \texttt{pending=false}, and updates the
+centroid/threshold from the committed values; the waiter deque on the
+slot is unchanged. On a follower, no pending slot exists, so
+\texttt{apply\_acquire} inserts a fresh \texttt{SemanticLock} with
+\texttt{pending=false}. The leader's handler now proceeds to Qdrant.
+
+\paragraph{\textbf{Walkthrough.}} A single \texttt{AcquireGuard} for an
+unconflicted write incurs (i) one local CV check (sub-microsecond if the
+table is empty), (ii) one parallel \texttt{AppendEntries} round to four
+peers, on which the slowest single round dominates (typically $\le$ 75~ms),
+(iii) the local Qdrant \texttt{PUT} (5--10~ms typical), and (iv) the
+\textsc{release} consensus round. Steps (ii) and (iv) are the irreducible
+floors on write latency, and together they bound the observed P95 of 68~ms
+in our Locust write workload (\S\ref{sec:eval}).
+
+\subsection{Pending Lock Semantics}
+\label{sec:pending}
+
+The pending flag exists to close a specific admission/consensus race.
+Suppose Phase~1 succeeds and the handler calls \texttt{Propose}. While the
+proposal is being replicated, the leader's gRPC server is still serving
+other agents. A second agent~B with a payload that conflicts with~A's
+arrives. If A had not inserted any reservation, B's call to
+\texttt{find\_conflict\_locked} would scan only the committed locks and
+return ``no conflict''---B would then enter Phase~2 \emph{in parallel with}
+A. Both proposals could commit before either applies, and the lock table
+would contain \emph{both} A and B as concurrent winners of the same
+semantic region.
+
+The pending slot, inserted under \texttt{mu\_} at the end of Phase~1, makes
+this impossible. The slot has the same shape as a real lock---an
+\texttt{agent\_id}, a centroid, a threshold, and a waiter
+deque---differing only in \texttt{pending=true}. Because
+\texttt{find\_conflict\_locked} does not distinguish pending from real, B
+will see A's pending slot, fail the conflict check, and either enqueue
+behind A or be requeued onto a stronger blocker on its next rebalance.
+The window between admission and durable agreement is reduced to a single
+mutex hold inside \texttt{wait\_for\_admission}.
+
+The interaction with the conflict predicate is subtle but consistent: the
+predicate is evaluated against the centroid stored on the slot, which is
+the embedding the requester supplied; once the slot is promoted, the
+centroid does not change. Pending slots therefore have the same
+geometric reach as fully committed locks, and any waiter that conflicts
+with a pending slot will continue to conflict after promotion.
+
+\subsection{Ghost Lock Prevention}
+\label{sec:ghost}
+
+A \emph{ghost lock} is a pending slot that was never promoted but also
+never removed. It can arise in two ways: (i) \texttt{Propose} times out or
+fails because consensus could not be reached; (ii) the leader steps down
+(loses leadership) between Phase~1 and the APPLY callback. If the slot is
+left in place, every future request that conflicts with it will block
+forever; the system effectively wedges on that semantic region.
+
+DSCC handles both cases through a deterministic compensating-RELEASE path:
+
+\begin{enumerate}
+\item On \texttt{Propose} or \texttt{WaitUntilApplied} failure, the handler
+  calls \texttt{remove\_pending(agent\_id)}. \texttt{remove\_pending} is a
+  no-op if the entry has already been promoted (\texttt{pending=false}),
+  and otherwise it (a) erases the entry from \texttt{active\_}, (b) detaches
+  its waiter deque, and (c) reuses \texttt{rebalance\_waiters\_locked} to
+  redistribute or grant those waiters.
+\item Independently, the handler appends a compensating \textsc{release}
+  entry locally via \texttt{AppendLocalEntry}, which adds the entry to the
+  local Raft log without waiting for quorum. If the original
+  \textsc{acquire} did happen to have replicated to a subset of followers
+  before failing, the compensating \textsc{release} will follow it through
+  the normal heartbeat replication path and remove the lock on those
+  followers when it commits. If the \textsc{acquire} never replicated, the
+  compensating \textsc{release} applies harmlessly via the
+  ``\texttt{release} for unknown \texttt{agent\_id}'' branch in
+  \texttt{apply\_release} (which logs a warning and returns).
+\end{enumerate}
+
+A second cleanup mechanism exists for case (ii): when a node becomes
+leader, it calls \texttt{begin\_leader\_sweep()} on its
+ActiveLockTable, which (a) gates new \texttt{wait\_for\_admission} calls
+behind a condition variable and (b) returns a snapshot of all currently
+held \texttt{agent\_id}s. The new leader then proposes a \textsc{release}
+for each, restoring the cluster's lock table to a consistent baseline.
+\texttt{end\_leader\_sweep()} then ungates admissions. The combination of
+the per-request compensating path and the per-leader sweep covers all
+ghost-lock scenarios we have identified.
+
+\subsection{ReleaseGuard Protocol}
+\label{sec:release}
+
+On the success path, \texttt{AcquireGuard} ends with a call to \\
+\texttt{commit\_release\_once()}, which is also bound to a \texttt{ScopeExit}
+guard so it fires on every error path. \texttt{commit\_release\_once}
+proposes a \texttt{LogEntry\{op=RELEASE, agent\_id\}} via Raft, waits until
+applied, and returns. \texttt{apply\_release} on every node delegates to
+\texttt{ActiveLockTable::release}, which performs three steps under
+\texttt{mu\_}: (a) \texttt{remove\_lock\_locked} erases the
+\texttt{SemanticLock} entry and detaches its waiter deque,
+(b) \texttt{rebalance\_waiters\_locked} processes the orphaned deque
+(\S\ref{sec:rebalancer}), and (c) on the leader only, the granted-waiter
+list is held until \texttt{mu\_} drops, then each granted waiter's CV is
+notified. The CV-after-mutex ordering is critical for performance and
+correctness, as discussed in \S\ref{sec:notify}.
+
+The explicit \texttt{ReleaseGuard} RPC exists primarily for testing and
+agent-side error recovery; in normal operation, the \textsc{release} is
+fired automatically by \texttt{AcquireGuard} after the Qdrant write
+completes (or fails). This keeps the lock-hold window tightly bounded
+to the actual write duration plus the optional \texttt{LOCK\_HOLD\_MS}
+artificial delay used for benchmark scenarios.
+
+\subsection{Known Limitations of the Raft Implementation}
+\label{sec:raft-limit}
+
+We deliberately accepted four engineering simplifications and document
+each here.
+
+\paragraph{\textbf{Sequential vote collection.}} \texttt{StartElection} sends
+\texttt{RequestVote} RPCs serially to all peers, giving worst-case
+election time $O(N\times \texttt{rpc\_timeout})$. On a healthy local
+network all RPCs return in under 5~ms each and the parallel-versus-serial
+gap is invisible; on a high-latency WAN this would significantly delay
+recovery. The fix is straightforward: spawn one thread per peer or use async/coroutines and collect responses on a shared atomic
+counter. We did not implement this because the production-grade fix
+also requires a \emph{cancellation} story for outstanding RPCs once
+quorum is reached, and that interacts non-trivially with the
+configured \texttt{rpc\_timeout} budget.
+
+\paragraph{\textbf{Absence of pre-vote.}} A node that was partitioned and
+incremented its term in isolation will, on rejoin, immediately step the
+current healthy leader down by sending \texttt{RequestVote} with the
+larger term. This causes an unnecessary election. The pre-vote
+extension to Raft~\cite{raft-thesis} runs a hypothetical
+``would-you-vote-for-me'' round before incrementing the term; only if a
+quorum says yes is the term incremented. Production Raft implementations
+in etcd, CockroachDB~\cite{cockroachdb}, and Consul implement
+pre-vote for exactly this reason. We mark it as future work.
+
+\paragraph{\textbf{gRPC backoff sensitivity.}} A single dropped packet can push a
+gRPC channel into its exponential backoff window, silencing heartbeats
+to that peer. If this happens on the leader's channel to enough peers,
+its election timer can fire and trigger a spurious election. Channel-level
+keepalive tuning (\texttt{GRPC\_ARG\_KEEPALIVE\_TIME\_MS}) and an
+application-level retry budget mitigate this; we recommend these settings
+for production use but currently rely on default channel parameters.
+
+% TODO - NEED TO MODIFY TO CONTAIN WAL
+\paragraph{WAL without snapshots.} The Raft log is
+\texttt{std::vector<LogEntry>} in process memory, with a sentinel at
+index~0. There is no WAL and no snapshot mechanism: on process restart, a
+node loses its log and rejoins as a fresh follower, requiring a full
+replay from the leader. \texttt{InstallSnapshot} is wired for the term
+check but does not actually install snapshot data. A production fix
+requires a durable WAL (e.g., a memory-mapped file with \texttt{fdatasync}
+on commit), a periodic snapshot of the lock table, and a working
+\texttt{InstallSnapshot} implementation that the leader can use when a
+follower's log has been compacted away.
+
+\paragraph{\textbf{Forward pointer.}}
+The Raft layer guarantees that every node sees the same totally ordered
+log of \textsc{acquire}/\textsc{release} entries; the lock table on each
+node is therefore a deterministic function of that log.
+\S\ref{sec:lock-table} now dissects how the lock table itself is
+structured to make admission, fairness, and rebalancing efficient.
+
+
+%% =====================================================================
+\section{The ActiveLockTable}
+\label{sec:lock-table}
+
+The ActiveLockTable is the central technical contribution of this paper.
+It is the in-memory data structure that answers, for every incoming
+request, two questions: \emph{``Does this request conflict with any
+active or pending lock?''} and, if so, \emph{``Which lock should this
+request wait behind, and in what queue position?''}\ It also implements
+the cascading grant rebalancer, which preserves FIFO fairness within each
+conflict group while granting as many waiters as possible per release.
+
+\subsection{Design Motivation: The Thundering-Herd Failure of the
+Single-CV Design}
+\label{sec:lock-motivation}
+
+The earliest implementation used the simplest possible representation:
+a flat \texttt{std::vector<SemanticLock>} guarded by a single mutex
+\texttt{mu\_} and a single global condition variable \texttt{cv\_}.
+On every release, the code called \texttt{cv\_.notify\_all()}; every
+sleeping waiter then woke up, re-acquired \texttt{mu\_}, and re-ran the
+conflict scan. This was correct, but it had three pathological behaviors.
+
+\paragraph{\textbf{Thundering herd.}}
+Consider Case~1 (\emph{The Thundering Herd}): 13 agents arrive
+simultaneously with the same payload, all conflict, and one wins
+admission while the other 12 enqueue. When the winner releases,
+\texttt{notify\_all} wakes all 12. They contend on \texttt{mu\_} in
+serial; each acquires it, runs the $O(n)$ scan, finds it still conflicts
+with the next granted lock, and goes back to sleep. Eleven of the twelve
+wakeups produced no progress, and they together held \texttt{mu\_} for
+roughly $11\times O(n)$ time, blocking the granted waiter from making
+forward progress. Throughput degrades nearly linearly with queue depth.
+
+\paragraph{\textbf{Quantitative characterization.}}
+In a microbenchmark with 13 agents on the same conflict region, the
+single-CV design produced a wakeup-to-grant ratio of approximately
+$12{:}1$: 12 wasted wakes per 1 useful grant. Each wasted wake added
+$\approx$ 0.3--1.5~ms of mutex hold time (depending on $n$), so the
+effective serialization rate was bounded around 100--200 grants/second
+even on an otherwise idle machine. Under our per-waiter CV design, the
+ratio is $0{:}1$: only the next-to-grant waiter is woken, and it
+proceeds directly to Phase~2 without re-running the conflict scan.
+
+\paragraph{\textbf{FIFO violation.}}
+With \texttt{notify\_all}, the order in which threads regain
+\texttt{mu\_} is OS-scheduler-dependent. A thread that was 12th in the
+queue might re-acquire \texttt{mu\_} before a thread that was 2nd, run
+the conflict scan, and find a transient gap (say, a third lock just
+released). It would then claim admission ahead of the 2nd-in-line waiter,
+violating FIFO fairness. This is observable as agents reporting
+\texttt{wait\_position=12} but \texttt{queue\_hops=0} and a low
+\texttt{lock\_wait\_ms}---a fast, unfair grant.
+
+These three behaviors together motivate the per-lock waiter deque and
+per-waiter CV design that follows.
+
+\subsection{Data Model}
+\label{sec:lock-data}
+
+
+% TODO - figure out what this is and how to fix it in the viewplane
+% Listing~\ref{lst:lock-data} captures the production data model.
+
+% \begin{lstlisting}[caption={Production data model in
+%    \texttt{src/active\_lock\_table.h}.},label={lst:lock-data}]
+% struct WaitQueueEntry {
+%     std::string waiting_agent_id;
+%     std::vector<float> embedding;
+%     float theta = 0.0f;
+%     std::shared_ptr<std::condition_variable> cv;
+%     bool ready   = false;   // "you may re-check now"
+%     bool granted = false;   // "the releaser handed
+%                             //  ownership to you"
+%     int  queue_hops = 0;    // requeue moves
+% };
+
+% struct SemanticLock {
+%     std::string agent_id;
+%     std::vector<float> centroid;
+%     float threshold;
+%     bool  pending = false;
+%     std::deque<std::shared_ptr<WaitQueueEntry>> waiters;
+% };
+
+% class ActiveLockTable {
+%     std::unordered_map<std::string, SemanticLock> active_;
+%     mutable std::mutex mu_;
+%     bool sweep_in_progress_ = false;
+%     std::condition_variable sweep_cv_;
+% };
+% \end{lstlisting}
+
+\paragraph{\textbf{Field-by-field invariants.}}
+\texttt{WaitQueueEntry::waiting\_agent\_id} identifies the request and
+is used as the key when the waiter is later promoted to a lock.
+\texttt{embedding} and \texttt{theta} are immutable for the lifetime of
+the waiter and capture the conflict predicate input the request was
+admitted under. \texttt{cv} is private to the waiter; only the
+rebalancer ever calls \texttt{notify\_all} on it. \texttt{ready} gates
+the wait predicate so that spurious wakeups (none are expected, but the
+code is defensive) re-loop into the conflict scan. \texttt{granted}
+distinguishes the \emph{ownership-handoff} wakeup (the rebalancer has
+already inserted a pending slot for this waiter, so it must skip the
+scan and proceed directly to Phase~2) from a \emph{rescan} wakeup (the
+waiter must rerun \texttt{find\_conflict\_locked}). \texttt{queue\_hops}
+is incremented every time the rebalancer moves the waiter from one
+lock's deque to another, providing per-waiter telemetry on rebalancing
+churn.
+
+\texttt{SemanticLock::agent\_id} is the key in the
+\texttt{unordered\_map}, giving $O(1)$ insertion, removal, and lookup.
+\texttt{centroid} is the lock's representative vector; it is set to the
+admitting request's embedding and never changes. \texttt{threshold} is
+recorded for telemetry but, as noted in \S\ref{sec:semantic-conflict},
+is \emph{not} used by the conflict predicate---the incoming request's
+$\theta$ is used. \texttt{pending} is true while the slot is awaiting
+Raft commit and false thereafter. \texttt{waiters} is a FIFO deque:
+insertions are always at the back (\texttt{push\_back}), the rebalancer
+pops always from the front (\texttt{pop\_front}).
+
+\texttt{ActiveLockTable::active\_} is keyed by \texttt{agent\_id} so
+that release and APPLY events---both of which carry only an
+\texttt{agent\_id}---are $O(1)$. \texttt{mu\_} is a single mutex
+protecting all state; the design tolerates this because the critical
+sections are short ($O(n)$ in the number of active locks, with $n$
+typically small) and the mutex is dropped before any CV notifications.
+\texttt{sweep\_in\_progress\_} and \texttt{sweep\_cv\_} implement the
+leader-sweep gate from \S\ref{sec:ghost}.
+
+\subsection{Conflict Detection and Strongest-Blocker Selection}
+\label{sec:conflict-detect}
+
+The conflict scan, \texttt{find\_conflict\_locked}, walks every entry
+in \texttt{active\_} and computes cosine similarity to the incoming
+embedding (Equation~\ref{eq:conflict}). It returns the lock with the
+\emph{highest} similarity that meets or exceeds $\theta$, or
+\texttt{nullptr} if no entry conflicts. The choice of ``strongest
+blocker'' rather than ``any blocker'' or ``random blocker'' is
+deliberate.
+
+\paragraph{\textbf{Why strongest.}} The waiter that attaches to the lock with
+the largest cosine to its own centroid is the waiter most likely to
+\emph{still} conflict with that same lock at any future time. Attaching
+to a weaker blocker (lower cosine) means that, when that weaker blocker
+releases, the waiter is highly likely to be requeued onto a different
+(probably stronger) blocker, incurring a queue-hop. Attaching to the
+strongest blocker minimizes expected queue-hops per waiter, which directly
+reduces tail latency.
+
+\paragraph{\textbf{Threshold asymmetry, revisited.}}
+\texttt{find\_conflict\_locked} always uses the \emph{incoming}
+$\theta$. The implication for the caller is that adjusting one's own
+$\theta$ down monotonically increases the set of locks one can be
+blocked by, but adjusting one's own $\theta$ up does not change whether
+one's centroid blocks anyone else's request---that is determined by
+\emph{their} $\theta$ when they are admitted. This makes $\theta$ a
+client-private knob: a particularly conservative agent can self-protect
+without forcing peers to do the same.
+
+\subsection{The Rebalancer}
+\label{sec:rebalancer}
+
+When a lock is released, its waiter deque is detached from the
+\texttt{SemanticLock} and passed to
+\texttt{rebalance\_waiters\_locked}. Listing~\ref{lst:rebal} captures
+the core loop. The rebalancer runs entirely under \texttt{mu\_}, then
+hands its caller a \texttt{granted\_waiters} list; the caller drops
+\texttt{mu\_} and only then calls \texttt{notify\_all} on each granted
+waiter's CV.
+
+
+% TODO - same figure out here what is going on and replace with something that can be seen in the viewport
+% \begin{lstlisting}[caption={Cascading grant rebalancer
+%   (\texttt{src/active\_lock\_table.cpp}, lines 277--318).},label={lst:rebal}]
+% void ActiveLockTable::rebalance_waiters_locked(
+%     std::deque<std::shared_ptr<WaitQueueEntry>> waiters,
+%     std::vector<std::shared_ptr<WaitQueueEntry>>& granted) {
+%   while (!waiters.empty()) {
+%     auto w = waiters.front();
+%     waiters.pop_front();
+
+%     auto c = find_conflict_locked(w->embedding, w->theta);
+%     if (c.lock != nullptr) {
+%       // Path A: still blocked, requeue under new
+%       // strongest blocker; do NOT notify (still asleep).
+%       w->ready = false;
+%       w->granted = false;
+%       ++w->queue_hops;
+%       c.lock->waiters.push_back(w);
+%       continue;
+%     }
+
+%     // Path B: conflict cleared, hand off ownership.
+%     insert_pending_locked(w->waiting_agent_id,
+%                           w->embedding, w->theta);
+%     w->granted = true;
+%     w->ready   = true;
+%     granted.push_back(std::move(w));
+%   }
+% }
+% \end{lstlisting}
+
+\paragraph{Per-iteration semantics.}
+\textbf{Path A (still blocked).} The waiter was orphaned from a
+released lock but, because the released lock was not its only blocker,
+some \emph{other} active or pending lock still conflicts. We requeue
+the waiter onto the new strongest blocker, increment \texttt{queue\_hops}
+for telemetry, and \emph{do not} notify the waiter's CV---it stays
+asleep on the same CV instance, simply attached to a new
+\texttt{SemanticLock}. The thread is unaware of the migration; from its
+perspective, the wait is one continuous \texttt{cv->wait()}.
+
+\textbf{Path B (conflict cleared).} No active or pending lock conflicts
+with the waiter. We insert a pending slot for the waiter under
+\texttt{mu\_}---the same way \texttt{wait\_for\_admission} would have
+done if the waiter had arrived fresh---then mark \texttt{granted=true,
+ready=true} and add the waiter to the granted list. The pending slot
+participates in subsequent iterations of the same rebalance pass: this
+is what produces the cascading-grant effect (\S\ref{sec:cascade}).
+
+\paragraph{\textbf{Ordering guarantees.}}
+The rebalancer pops waiters \emph{front-to-back} from the orphaned
+deque. Because the deque is FIFO (\texttt{push\_back} on insertion),
+this preserves the order in which waiters originally enqueued on the
+released lock. A waiter that was enqueued earlier is granted earlier,
+or is requeued before later-enqueued waiters; in either case its
+\emph{relative} position never deteriorates. We make this property
+precise in the correctness argument of \S\ref{sec:correctness}.
+
+\paragraph{\textbf{CV-after-mutex.}}
+We notify granted waiters only after \texttt{mu\_} has been released
+(\S\ref{sec:notify}). This is critical: if the wakeup happened inside
+\texttt{mu\_}, the waking thread would immediately attempt to
+re-acquire \texttt{mu\_} and would block on the releaser, serializing
+the two threads where parallelism is otherwise possible.
+
+\subsection{Cascading Grant Effect}
+\label{sec:cascade}
+
+The most subtle property of the rebalancer is that granting a waiter
+in iteration~$k$ may cause a later iteration $k'>k$ to take Path~A,
+i.e.,~granting one waiter can block subsequent waiters in the same
+rebalance pass. We illustrate with a concrete example.
+
+\paragraph{\textbf{Setup.}} Active locks: $X$ held by agent~A,
+$Y$ held by agent~B. $X$'s waiter deque: $[W_1, W_2, W_3]$, all
+admitted with the same $\theta$. Embeddings:
+
+\begin{itemize}
+\item $\cos(W_1,Y)=0.20$, $\cos(W_1,W_2)=0.85$, $\cos(W_1,W_3)=0.10$.
+\item $\cos(W_2,Y)=0.10$, $\cos(W_2,W_3)=0.10$.
+\item $\cos(W_3,Y)=0.10$.
+\end{itemize}
+
+$\theta=0.75$. All three were attached to $X$ because each had
+$\cos(\cdot,X)\ge 0.75$. Agent~A releases $X$.
+
+\paragraph{Iteration 1.} The rebalancer pops $W_1$ and scans
+\texttt{active\_}$=\{Y\}$. $\cos(W_1,Y)=0.20<\theta$, no conflict.
+Path~B: insert pending slot for $W_1$, mark
+$W_1.\textit{granted}=\textit{true}$, push to granted list.
+\texttt{active\_}$=\{Y,W_1\}$.
+
+\paragraph{Iteration 2.} Pop $W_2$, scan
+\texttt{active\_}$=\{Y,W_1\}$. $\cos(W_2,Y)=0.10<\theta$, but
+$\cos(W_2,W_1)=0.85\ge\theta$. Conflict; $W_1$ is the strongest (only)
+blocker. Path~A: \texttt{++queue\_hops}, append $W_2$ to $W_1$'s waiter
+deque, do not notify.
+
+\paragraph{Iteration 3.} Pop $W_3$, scan
+\texttt{active\_}$=\{Y,W_1\}$. $\cos(W_3,Y)=0.10$, $\cos(W_3,W_1)=0.10$.
+Both below $\theta$. Path~B: insert pending slot for $W_3$, mark
+granted, push to granted list. \texttt{active\_}$=\{Y,W_1,W_3\}$.
+
+\paragraph{\textbf{Outcome.}} $W_1$ and $W_3$ are granted in this single pass.
+$W_2$ has been migrated to $W_1$'s deque and continues sleeping. When
+$W_1$ later releases, a new rebalance pass on $[W_2]$ will re-evaluate
+$W_2$ against the then-current state and either grant or further requeue
+it. \emph{$W_2$ never overtakes $W_1$ in this scheme}: because it was
+behind $W_1$ in the original deque, it was processed second and can only
+land on $W_1$'s deque or behind whichever lock it happens to conflict
+with at that moment. Per-deque FIFO is preserved.
+
+\paragraph{\textbf{Why this matters.}}
+The cascading grant is the mechanism by which a single release can wake
+multiple unrelated waiters in one $O(w \cdot n)$ pass without violating
+fairness. In the original single-CV design, the equivalent of this would
+be 12 wakeups, 11 wasted scans, and an OS-scheduler-dependent grant
+order. Here, the rebalancer makes all the decisions deterministically
+under one mutex hold and only wakes the waiters whose decisions are
+\emph{positive}.
+
+\subsection{Notification Safety and Wakeup Semantics}
+\label{sec:notify}
+
+Two boolean flags on each \texttt{WaitQueueEntry} encode the two reasons
+a waiter could be woken.
+
+\paragraph{\texttt{ready}: ``you may re-check now.''}
+The waiter's \texttt{cv->wait(lock, [\&]\{ return waiter->ready; \})}
+sleeps until \texttt{ready=true}. The rebalancer sets it true only on
+the granted (Path~B) path. After the wait returns, the waiter
+\emph{immediately} clears \texttt{ready} so a future spurious wakeup
+re-enters the wait.
+
+\paragraph{\texttt{granted}: ``ownership has been handed off.''}
+On Path~B, the rebalancer also sets \texttt{granted=true} \emph{and}
+inserts a pending slot into \texttt{active\_}. When the waiter wakes
+and observes \texttt{granted}, it must \emph{not} re-run the conflict
+scan, because the slot is already in the table on its behalf. It
+breaks out of the loop, records the trace, and proceeds to Phase~2
+(Raft \textsc{acquire}).
+
+\paragraph{\textbf{Why two flags rather than one?}}
+A single ``you can go now'' flag would conflate two cases that have
+different post-wake handling: a granted waiter must skip the
+\texttt{find\_conflict\_locked} call (the slot already exists), while a
+spuriously woken waiter must re-run it. Splitting the flags makes the
+post-wake code path branch-free in the common case (granted) and
+correct in the uncommon case (spurious).
+
+\paragraph{\textbf{Spurious wakeups.}}
+The current code sets \texttt{ready=true} only with
+\texttt{granted=true} in the same critical section, so in practice every
+wakeup is a grant handoff. The \texttt{while(true)} loop around the wait
+provides a safety net: if a future code path or an OS-level spurious
+wakeup ever sets \texttt{ready=true} without \texttt{granted=true}, the
+waiter falls back to a fresh conflict scan and re-enqueues correctly.
+
+\paragraph{shared\_ptr lifetimes.}
+The \texttt{WaitQueueEntry} is allocated as a \\
+\texttt{shared\_ptr<WaitQueueEntry>}. Two strong references hold it
+alive while it is in flight: (a) the local
+\texttt{shared\_ptr} on the sleeping thread's stack inside
+\texttt{wait\_for\_admission}, and (b) the entry on the \\
+\texttt{deque<shared\_ptr<WaitQueueEntry>>} of whichever lock currently
+owns it. The rebalancer transfers ownership between deques via
+\texttt{push\_back(w)}, never destroying the entry. After
+\texttt{mu\_} drops, the rebalancer's reference is moved into the
+\texttt{granted\_waiters} list and dropped after \texttt{notify\_all}.
+At no point does the sleeping thread's reference dangle.
+
+\subsection{Correctness Argument}
+\label{sec:correctness}
+
+We sketch an informal but rigorous argument for three properties.
+
+\paragraph{\textbf{(a) No two conflicting requests hold locks
+simultaneously.}}
+Suppose two requests $r_A, r_B$ with
+$\cos(\mathbf{v}_A,\mathbf{v}_B)\ge\theta$ both have
+\texttt{active\_} entries with \texttt{pending=false} at some
+instant~$t$. Without loss of generality, suppose $r_A$ was admitted
+first. By the protocol, $r_A$'s admission inserted a slot
+(\texttt{pending=true}) into \texttt{active\_} under \texttt{mu\_};
+that slot remained until \texttt{apply\_release} ran (and removed it
+under \texttt{mu\_}). Between insertion and removal, every call to
+\texttt{find\_conflict\_locked} for $r_B$ would have found
+$r_A$'s slot, because the scan iterates all entries (pending and
+real) and only requires $\cos\ge\theta$. Therefore $r_B$ would have
+been enqueued or requeued behind $r_A$, and could not have its own
+slot inserted before $r_A$'s removal. After $r_A$'s removal,
+\texttt{rebalance\_waiters\_locked} is responsible for promoting $r_B$,
+and Path~B inserts $r_B$'s pending slot only when no current entry
+conflicts---contradicting the assumption that $r_A$'s slot was
+present at~$t$.
+
+\paragraph{\textbf{(b) Every blocked request is eventually granted.}}
+A blocked waiter is on some \texttt{SemanticLock}'s deque. We argue
+liveness by induction on the number of locks in \texttt{active\_}.
+Base case: with one lock, the next \texttt{release} triggers a
+rebalance; the deque is processed front-to-back, and the first waiter
+takes Path~B (no other locks remain). Inductive case: with $k$ locks,
+the next \texttt{release} either (i) reduces the count to $k-1$ and
+triggers a rebalance that grants at least the front-most non-conflicting
+waiter, falling back to (b) on $k-1$ locks; or (ii) leaves the waiter
+on a different lock's deque (Path~A), where the same argument applies
+under that lock's eventual release. Because Raft ensures every
+admitted \textsc{acquire} has a matching \textsc{release} (via
+ScopeExit on success and via the compensating-RELEASE path on failure),
+every active lock eventually releases, and the induction terminates.
+
+\paragraph{\textbf{(c) FIFO within a conflict group.}}
+Consider two waiters $w_i, w_j$ enqueued on the same lock with $i$
+enqueued before $j$. By insertion-at-back, $w_i$ is in front of $w_j$
+in the deque. The rebalancer pops front-to-back, so on every release
+that triggers a rebalance, $w_i$ is processed before $w_j$. If $w_i$
+takes Path~B, it is granted; $w_j$ may still take Path~A and migrate,
+but it is processed strictly after $w_i$'s grant. If $w_i$ takes
+Path~A, $w_j$ is processed next and may also take Path~A, but the
+\emph{relative} ordering within whichever new deque they land on is
+preserved because the rebalancer pushes them back in the order it pops
+them. Hence $w_i$'s admission timestamp is no later than $w_j$'s.
+\\
+
+The lock table is correct in isolation, but the \emph{geometry} of
+``conflict'' is set by the embedding model. \S\ref{sec:embedding} now
+demonstrates that this choice is the dominant determinant of
+end-to-end correctness.
+
+%% =====================================================================
+\section{Embedding Model as Conflict Predicate}
+\label{sec:embedding}
+
+A correct lock manager that runs on top of a poorly-chosen embedder is
+not safe. The lock table only sees vectors and a scalar threshold; the
+question of \emph{which payloads will collide above $\theta$} is
+answered entirely by the embedder. We treat the embedder as a
+first-class component of the system and quantify how it controls the
+geometry of the lock space.
+
+\subsection{Why Model Choice Is Architectural, Not Pluggable}
+\label{sec:emb-arch}
+
+Three properties make the embedder architectural rather than a
+configuration knob.
+
+\paragraph{It defines the conflict space.}
+For a fixed $\theta$, the set of pairs that DSCC will treat as
+conflicts is exactly the set of payload pairs whose embeddings have
+cosine $\ge\theta$. Different embedders produce different distributions
+of cosine values for the same pairs. A model that maps paraphrases to
+$\cos\approx 0.65$ and unrelated sentences to $\cos\approx 0.10$ is
+safe at $\theta\in[0.55,0.65]$ but unsafe at $\theta=0.75$. A model that
+maps paraphrases to $\cos\approx 0.85$ is safe at $\theta=0.75$.
+Identical operating thresholds therefore have non-identical safety
+implications across models.
+
+\paragraph{It defines the threshold's calibration band.}
+The narrowness of the safe $\theta$-window depends on the model's
+discrimination: how separated paraphrase pairs are from cross-domain
+pairs in cosine space. A model with high discrimination admits a wide
+operating band; a model with low discrimination has a vanishingly
+narrow band, and any practical $\theta$ either misses paraphrases
+(false negatives) or over-blocks unrelated work (false positives).
+\S\ref{sec:gauntlet} shows this empirically.
+
+\paragraph{It defines the embedding-latency floor.}
+Embedding is on the agent-side hot path; even though it is not on the
+leader's critical section, it adds an irreducible per-operation cost.
+Models with 10~ms median embedding are comfortable for any workload;
+models with 130~ms median are comfortable only for workloads where
+admission latency dominates anyway.
+
+We treat the embedder as a deployment-time decision that must be
+co-calibrated with $\theta$. We present three candidates evaluated under
+the identical lock manager.
+
+\subsection{Models Evaluated}
+\label{sec:emb-models}
+
+\begin{table}[t]
+  \centering
+  \caption{Embedding models evaluated. Embedding latency is measured
+    via the Ollama HTTP API on the same host as the cluster.}
+  \label{tab:models}
+  \small
+  \begin{tabular}{lcccc}
+    \toprule
+    Model & Dim. & Params. & Emb.\ p50 & Emb.\ p99 \\
+    \midrule
+    \texttt{all-minilm:latest}      & 384  & ~23 M  & 10~ms  & 324~ms  \\
+    \texttt{bge-m3:latest}          & 1024 & 568 M  & 111~ms & 1{,}774~ms \\
+    \texttt{qwen3-embedding:0.6b}   & 1024 & 600 M  & 133~ms & 1{,}517~ms \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The three models in Table~\ref{tab:models} span 25$\times$ in parameter
+count and 13$\times$ in median latency. \texttt{all-minilm} is a
+distilled MiniLM transformer fine-tuned on sentence-level
+contrastive objectives; it produces 384-dimensional embeddings and
+runs in $\sim$10~ms on commodity CPUs. \texttt{bge-m3}~\cite{bge} is a
+multi-granularity bilingual encoder producing 1024-dimensional
+embeddings, with a tokenizer that handles dense, sparse, and ColBERT-style
+representations from a single model. \texttt{qwen3-embedding:0.6b}
+\cite{qwen3} is a 0.6B-parameter encoder distilled from Qwen3,
+producing 1024-dimensional embeddings; it is the largest model in our
+evaluation by parameter count and the slowest by median latency
+(133~ms p50). All three are served from a single Ollama container,
+selected per request via the \texttt{model} field.
+
+\subsection{Threshold Calibration Methodology}
+\label{sec:emb-theta}
+
+We swept $\theta\in\{0.55, 0.75, 0.95\}$ for every model. The values
+were chosen to cover three regions of the cosine space:
+$\theta=0.55$ is permissive and tests sensitivity to false positives
+(over-blocking); $\theta=0.75$ is the \emph{a priori} expected
+operating band based on standard sentence-similarity literature;
+$\theta=0.95$ is strict and tests sensitivity to false negatives
+(missed conflicts). For each $(\theta,\text{model})$ combination we ran
+all 13 benchmark scenarios, totaling $3\times3\times13=117$ case runs.
+Each case re-instantiated the Docker stack with the appropriate
+\texttt{THETA} and \texttt{model} parameters; embeddings were recomputed
+on stack startup and reused throughout the case so that timing
+measurements were not dominated by repeated inference.
+
+\subsection{Paraphrase Gauntlet Results}
+\label{sec:gauntlet}
+
+\begin{table}[t]
+  \centering
+  \caption{Paraphrase Gauntlet (Case 11) serialization scores.
+    Twelve paraphrase pairs of architectural design intent; lower
+    scores mean missed conflicts (semantic race conditions).}
+  \label{tab:gauntlet}
+  \small
+  \begin{tabular}{lccc}
+    \toprule
+    Model & $\theta=0.55$ & $\theta=0.75$ & $\theta=0.95$ \\
+    \midrule
+    \texttt{all-minilm}   & 0.750 & 0.500 & 0.833 \\
+    \texttt{bge-m3}       & 0.972 & 0.750 & 0.667 \\
+    \texttt{qwen3:0.6b}   & 0.875 & \textbf{1.000} & 0.917 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The Paraphrase Gauntlet (Case~11) is our primary correctness test: 12
+paraphrase pairs drawn from a single semantic domain (sustainability
+design), all of which should serialize. Table~\ref{tab:gauntlet}
+reports serialization scores for the full $3\times 3$ grid.
+
+\paragraph{\texttt{all-minilm} fails at every $\theta$.}
+The best score for \texttt{all-minilm} is 0.833 at $\theta=0.95$,
+meaning $2$ of $12$ paraphrase pairs were missed. At $\theta=0.75$ the
+score collapses to 0.500---half of all paraphrase conflicts were
+allowed to race. Lowering $\theta$ to 0.55 improves the score to 0.750
+but incurs cross-domain false positives (\S\ref{sec:emb-flood}).
+\texttt{all-minilm}'s embedding space lacks the angular resolution to
+separate paraphrase pairs from non-conflicting pairs at the same
+$\theta$ band; this is a model capability gap, not a tuning issue.
+
+\paragraph{\texttt{bge-m3} peaks at low $\theta$ then degrades.}
+\texttt{bge-m3} achieves 0.972 at $\theta=0.55$ but degrades to 0.667
+at $\theta=0.95$. Its calibration band is narrow and on the wrong side
+of $\theta=0.75$ for our paraphrases. The model assigns
+high-but-not-extreme cosines to paraphrases ($\sim\!0.7$--$0.85$); a
+strict threshold misses pairs whose cosine fell just below.
+
+\paragraph{\texttt{qwen3-embedding:0.6b} is the unique zero-violation
+operating point.}
+Only \texttt{qwen3} at $\theta=0.75$ achieves 1.000 with zero
+violations. At $\theta=0.55$ it scores 0.875 (three paraphrases
+slipped through because the threshold is too permissive to differentiate
+within the conflict cluster); at $\theta=0.95$ it scores 0.917 (one
+paraphrase fell below the strict threshold). The combination of larger
+parameter count and modern training recipe gives \texttt{qwen3}
+\emph{both} a tighter paraphrase cluster and clearer separation from
+unrelated content.
+
+\paragraph{Non-monotonic behavior of \texttt{all-minilm}.}
+\texttt{all-minilm}'s scores across $\theta$ are not monotonic: 0.750
+at 0.55, drops to 0.500 at 0.75, recovers to 0.833 at 0.95. The dip
+reflects the fact that lowering $\theta$ is not a substitute for a
+better embedder. At $\theta=0.55$ it catches some paraphrases by
+sweeping too widely, but it also blocks many non-conflicting
+operations, creating queue contention that ironically allows some
+paraphrase pairs to interleave across queues. At $\theta=0.75$ the
+queue contention is reduced but \texttt{all-minilm} simply does not
+score paraphrases highly enough to trigger blocking. At $\theta=0.95$
+only the very tightest paraphrase pairs trigger, but they happen to
+be the most overlapping ones in the test set, recovering most of the
+score. The overall message: \emph{no $\theta$ rescues a poorly
+calibrated model}.
+
+\subsection{Precision, Recall, and the Asymmetric Cost of False
+Negatives}
+\label{sec:emb-pr}
+
+We can frame conflict detection as binary classification. A
+\emph{true positive} is a pair that was flagged as conflicting and
+serialized; a \emph{false negative} is a pair that should have been
+flagged but was missed (a semantic race condition); a \emph{false
+positive} is a pair that was unnecessarily blocked; a \emph{true
+negative} is a pair that was correctly allowed to run in parallel.
+Precision is $\textsc{TP}/(\textsc{TP}+\textsc{FP})$; recall is
+$\textsc{TP}/(\textsc{TP}+\textsc{FN})$.
+
+\paragraph{Recall dominates precision in this domain.}
+A false negative corrupts shared agent memory permanently: two
+duplicate-intent points are persisted in Qdrant and cannot be later
+distinguished without re-running the same embedding/threshold
+predicate. A false positive merely delays one operation. The cost
+asymmetry is therefore enormous in favor of recall.
+
+For our use case, the operating-point criterion is recall $=1.000$
+with the highest precision achievable subject to that recall. The
+serialization score (Equation~\ref{eq:serscore}) is an exact mirror of
+recall on conflict pairs: $\textsc{ss}=\textsc{TP}/(\textsc{TP}+
+\textsc{FN})$. \texttt{qwen3} at $\theta=0.75$ is the unique
+combination that satisfies recall $=1.000$ on the Paraphrase Gauntlet.
+
+\subsection{Threshold Sensitivity and Cross-Domain False Positives}
+\label{sec:emb-flood}
+
+\begin{table}[t]
+  \centering
+  \caption{Cross-Domain Flood (Case 12) at $\theta=0.55$:
+    distinct-pair parallelism collapses for the larger models due to
+    over-blocking.}
+  \label{tab:flood}
+  \small
+  \begin{tabular}{lcc}
+    \toprule
+    Model & Distinct par.\ rate & Op latency P95 \\
+    \midrule
+    \texttt{all-minilm}   & 0.222 & 3{,}069~ms \\
+    \texttt{bge-m3}       & 0.000 & 5{,}587~ms \\
+    \texttt{qwen3:0.6b}   & 0.000 & 5{,}652~ms \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The Cross-Domain Flood (Case~12) tests the opposite failure mode: 6
+sustainability writes and 6 construction writes that should run in
+parallel because they are semantically unrelated.
+Table~\ref{tab:flood} reports results at $\theta=0.55$. Both \texttt{bge-m3}
+and \texttt{qwen3} collapse to a 0.000 distinct-parallelism rate---every
+cross-domain pair was blocked---and their P95 latencies nearly double to
+$\sim$5.6~s. \texttt{all-minilm} retains 0.222 distinct parallelism but
+only because it under-discriminates everything.
+
+At $\theta=0.75$, \texttt{qwen3} recovers to a 0.306 distinct-parallelism
+rate (the upper bound is bounded by within-domain blocking, which
+correctly serializes concept-A-vs-concept-A and concept-D-vs-concept-D
+pairs); \texttt{bge-m3} reaches 0.278; \texttt{all-minilm} stays at
+0.222. The operating point at $\theta=0.75$ is stable for \texttt{qwen3}
+in the sense that small perturbations of $\theta$ (we tested
+$\pm 0.05$ in supplementary runs) do not flip the gauntlet result.
+
+\subsection{Embedding Latency and End-to-End Latency}
+\label{sec:emb-latency}
+
+The 133~ms p50 embedding latency for \texttt{qwen3} is incurred
+\emph{before} the \texttt{AcquireGuard} call and is therefore additive
+to every operation, regardless of contention. In contended scenarios
+(C1, C11, C13), the queue-wait component dominates the end-to-end
+latency by a factor of $5\times$--$20\times$, so the embedding
+overhead is invisible. In uncontended scenarios it is the dominant
+component, but writes still complete in $<$200~ms end-to-end. The
+\texttt{all-minilm} alternative shaves $\sim$120~ms off uncontended
+operations at the cost of an unrecoverable safety regression on
+paraphrases.
+
+\paragraph{Forward pointer.}
+\S\ref{sec:eval} now reports the full system evaluation, with
+particular attention to how the choice of model affects throughput,
+fairness, and resource utilization across the 117-run matrix.
+
+%% =====================================================================
+\section{Evaluation}
+\label{sec:eval}
+
+The evaluation answers four questions. (i) Does the per-waiter CV
+design eliminate the thundering-herd pathology? (ii) Does the
+cascading-grant rebalancer preserve FIFO fairness? (iii) Does the
+correctness-vs-throughput trade-off documented in \S\ref{sec:embedding}
+hold under the full 13-case suite? (iv) What does sustained-load
+behavior look like, and how does DSCC's CAP positioning manifest under
+partition?
+
+\subsection{Experimental Setup}
+\label{sec:eval-setup}
+
+\paragraph{Hardware.} All experiments ran on a single x86\_64 host
+(8 logical cores, 32~GB RAM) with the Docker daemon configured to
+allocate up to 6~CPUs and 24~GB to the project's containers. Persistent
+volumes for Qdrant and the Ollama model cache are bind-mounted from
+local NVMe storage.
+
+\paragraph{Topology.} A single \texttt{docker-compose.yml} brings up
+seven service containers:
+qdrant (\texttt{qdrant/qdrant:latest}, port 6333),
+embedding-service (\texttt{ollama/ollama:latest}, host:7997 →
+container:11434),
+five \texttt{dscc-node} containers (each compiled from the project
+\texttt{Dockerfile} with the \texttt{dscc-node} entrypoint), and one
+\texttt{dscc-proxy} container. Each \texttt{dscc-node} exposes both a
+client gRPC port (50051--50055) and a Raft inter-node port
+(50061--50065). Per-container resource limits emulate heterogeneous
+hardware, although our experiments do not exploit asymmetry.
+
+\paragraph{Benchmark runner.}
+\texttt{src/benchmark\_runner.cpp} ($\sim$3{,}060 lines) orchestrates
+agent threads, collects per-operation timing, and writes JSON and CSV
+result files. Each agent runs as a worker thread that issues
+\texttt{AcquireGuard} calls into the proxy. Every operation result
+records 13 wall-clock timestamps from
+\texttt{server\_received\_unix\_ms} through
+\texttt{lock\_released\_unix\_ms}, plus the trace fields
+(\texttt{wait\_position}, \texttt{queue\_hops}, \texttt{wake\_count},
+\texttt{blocking\_similarity\_score}, \texttt{blocking\_agent\_id},
+\texttt{active\_lock\_count}). We additionally collect per-container
+CPU, memory, and network usage by polling
+\texttt{docker stats --no-stream} every second.
+
+\paragraph{Result collection.}
+Each \emph{run} executes all 13 cases sequentially, with a fresh
+Qdrant collection per run. The \emph{matrix mode} runs the same suite
+under each $(\text{model},\theta)$ combination, totaling 117 case runs;
+results are merged into a single CSV plus per-combination JSON. The
+\emph{soak mode} runs a continuous workload for 2~hours and emits
+windowed snapshots every 60~s. Plotting scripts in \texttt{scripts/}
+consume the JSON/CSV artifacts and emit the figures used below.
+
+\subsection{Benchmark Suite Description}
+\label{sec:bench-cases}
+
+\begin{table}[t]
+  \centering
+  \caption{The 13 benchmark cases. Each is a self-contained workload
+    designed to surface a specific lock-table or system property.}
+  \label{tab:cases}
+  \scriptsize
+  \begin{tabular}{cl p{4.5cm}}
+    \toprule
+    \# & Name & Property targeted \\
+    \midrule
+    C1  & The Thundering Herd       & 13 agents, one semantic region;
+                                       per-waiter CV design \\
+    C2  & The Semantic Interleaving & Two parallel hot spots; verifies
+                                       cross-domain isolation \\
+    C3  & The Read-Starvation Trap  & Reader-writer fairness under
+                                       sustained write pressure \\
+    C4  & The Permissive Sieve      & Low-$\theta$ stress; tests false
+                                       positives \\
+    C5  & The Strict Sieve          & High-$\theta$ stress; tests false
+                                       negatives \\
+    C6  & The Ghost Client          & Proxy reconnect after leader
+                                       change; ghost-lock prevention \\
+    C7  & The Almost Collision      & Near-threshold pairs; boundary
+                                       precision \\
+    C8  & Queue Hopping             & Multiple conflict groups; tests
+                                       \texttt{queue\_hops} mechanics \\
+    C9  & The Mixed Stagger         & Time-staggered arrivals; fairness
+                                       under non-burst load \\
+    C10 & The 100\% Read Stampede    & All-read traffic; throughput
+                                       stress under semantic exclusion \\
+    C11 & The Paraphrase Gauntlet   & 12 paraphrase pairs; primary
+                                       correctness test \\
+    C12 & The Cross-Domain Flood    & Unrelated domains; tests
+                                       distinct parallelism \\
+    C13 & The Write Pressure
+        Ratchet                     & Escalating write rate; sustained
+                                       load \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Table~\ref{tab:cases} catalogs the 13 cases. Each tests one structural
+property of the system. \textbf{C1} (Thundering Herd) targets the lock
+table's wakeup discipline. \textbf{C2} (Semantic Interleaving) checks
+that two cleanly separated semantic regions remain mutually
+non-blocking. \textbf{C3} (Read-Starvation Trap) ensures that readers
+are not starved by a steady stream of writers when their embeddings
+overlap a single hot region. \textbf{C4} (Permissive Sieve) and
+\textbf{C5} (Strict Sieve) are calibration probes for false positives
+and false negatives, respectively. \textbf{C6} (Ghost Client) injects
+a leader change mid-run by killing the current leader; the proxy must
+discover the new leader via \texttt{GetLeader} and the cluster must
+not orphan any pending slot. \textbf{C7} (Almost Collision) tests
+boundary precision near $\theta$, with deliberately crafted near-pairs.
+\textbf{C8} (Queue Hopping) creates multiple semantic regions whose
+membership overlaps, forcing waiters to migrate via Path~A; we read
+\texttt{queue\_hops} from the trace to verify migration is occurring.
+\textbf{C9} (Mixed Stagger) introduces 100~ms inter-arrival gaps,
+testing the rebalancer under non-burst load. \textbf{C10}
+(100\% Read Stampede) confirms that read traffic still observes
+semantic exclusion. \textbf{C11} (Paraphrase Gauntlet) is the headline
+correctness test (\S\ref{sec:gauntlet}). \textbf{C12} (Cross-Domain
+Flood) is the headline parallelism test (\S\ref{sec:emb-flood}).
+\textbf{C13} (Write Pressure Ratchet) escalates write arrival rate to
+characterize sustained-load behavior.
+
+\subsection{Agent Wait Time and Latency Decomposition}
+\label{sec:eval-latency}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{scripts/plots/benchmark_run_1775079153/timing_01_wait_time_summary.png}
+  \caption{Agent wait-time summary across the 13 cases. C1 (Thundering
+    Herd) and C11 (Paraphrase Gauntlet) exhibit the highest median
+    wait, reflecting deep queues in genuinely contended semantic
+    regions; C2, C7, C10 all show near-zero wait, consistent with
+    correctly recognized non-conflicts.}
+  \label{fig:wait-summary}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{scripts/plots/benchmark_run_1775079153/timing_02_latency_component_breakdown.png}
+  \caption{End-to-end latency decomposed into Queue Wait, Qdrant Write
+    Window, Hold/Release Tail, and Other (proxy, gRPC, embedding lookup).
+    Queue Wait dominates contended cases (C1, C11, C13); Qdrant Write
+    Window is stable across all cases, ruling out the vector store as a
+    bottleneck.}
+  \label{fig:lat-decomp}
+\end{figure}
+
+Figure~\ref{fig:wait-summary} reports the per-case lock-wait
+distribution. The wait pattern matches the cases' designs: deep wait
+in C1, C11, and C13 (each is a contended-by-design scenario), and near-zero
+wait in C2 (parallel hot spots), C7 (sub-threshold pairs), and C10 (read
+stampede with low contention).
+
+Figure~\ref{fig:lat-decomp} decomposes end-to-end latency. Queue Wait
+dominates in C1, C11, and C13. The Qdrant Write Window is remarkably
+stable around 5--10~ms across every case---confirming that the vector
+store itself is not the bottleneck. The Other component (proxy, gRPC
+serialization, embedding-cache lookup) is consistently small. The
+key takeaway is that DSCC's contended latency is queue latency, not
+infrastructural latency: the system is doing exactly what it should
+under contention (serializing) and is not paying any tax for doing so.
+
+\subsection{Thundering Herd Case Study (C1)}
+\label{sec:eval-c1}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{scripts/plots/benchmark_run_1775079153/timing_timelines/timing_timeline_case_01_the_thundering_herd.png}
+  \caption{Per-agent timing timeline for C1. All 13 agents arrive in a
+    burst (left edge); they enter a deep queue under the leader's
+    semantic region and are granted one at a time in FIFO order. Each
+    bar is one agent's lock-hold interval; the staircase shape is the
+    correct cascade.}
+  \label{fig:c1}
+\end{figure}
+
+In C1, 13 agents arrive within a 50~ms window, all carrying paraphrases
+of the same sustainability concept. Under the legacy single-CV design,
+this was the worst case: 12 simultaneous wakeups per release, mostly
+wasted. Figure~\ref{fig:c1} shows the per-agent timing under the
+current per-waiter CV design. Bars are non-overlapping (FIFO grants)
+and the staircase is regular; the time between consecutive grants is
+dominated by the lock-hold parameter (\texttt{LOCK\_HOLD\_MS}=750~ms in
+C1), with sub-millisecond rebalancer overhead between grants.
+
+\paragraph{Quantified improvement.} Under the single-CV design we
+measured a median wakeup-to-grant ratio of $\sim$11.4 (i.e., 11.4
+wasted wakeups per useful grant) at queue depth 12. Under the per-waiter
+CV design the ratio is 0: no wasted wakes. The
+\texttt{wake\_count} field in every \texttt{AcquireResponse} from C1 is
+exactly~1, confirming that each agent was woken exactly once---when it
+was its turn. End-to-end completion time for the herd dropped from
+$\sim$11.5~s (single-CV) to $\sim$10.0~s (per-waiter CV), a reduction
+that is precisely the wasted-wake overhead.
+
+\subsection{Queue Hopping Case Study (C8)}
+\label{sec:eval-c8}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{scripts/plots/benchmark_run_1775079153/timing_timelines/timing_timeline_case_08_queue_hopping.png}
+  \caption{C8 timeline. Agents 1--6 land first on the construction
+    region, then migrate when the sustainability region opens up. The
+    \texttt{queue\_hops} field on each agent's response shows the
+    migration count.}
+  \label{fig:c8}
+\end{figure}
+
+C8 creates two overlapping semantic regions and 20 agents whose
+embeddings shift between the two. Figure~\ref{fig:c8} traces the
+per-agent timeline. Several agents take Path~A in the rebalancer once,
+then take Path~B on the next release; this is reflected in
+\texttt{queue\_hops}=1 in their response. A small minority of agents
+hop twice (\texttt{queue\_hops}=2), corresponding to cases where two
+sequential releases each migrated the waiter before clearing it.
+Importantly, no agent's relative position regresses across hops:
+within any single rebalance pass, the order of grants matches the
+order of original enqueueings. Empirically, C8's
+\emph{wait-position-vs-elapsed-time} plot
+(\texttt{timing\_04\_queue\_depth\_vs\_wait.png}) is monotonic in
+position---the longer a waiter was queued, the longer it waited---which
+is exactly the FIFO-fairness property argued in
+\S\ref{sec:correctness}.
+
+\subsection{Paraphrase Gauntlet Case Study (C11)}
+\label{sec:eval-c11}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{scripts/plots/matrix/matrix_06_case11_paraphrase.png}
+  \caption{C11 (Paraphrase Gauntlet) serialization score and operation
+    P95 latency for every (model, $\theta$) combination. The unique
+    operating point with serialization score 1.000 is
+    \texttt{qwen3} at $\theta=0.75$.}
+  \label{fig:c11-matrix}
+\end{figure}
+
+Figure~\ref{fig:c11-matrix} plots the C11 results for the full matrix.
+The horizontal axis is $\theta$; bars are grouped by model. The
+serialization-score panel is the headline plot of the paper:
+\texttt{qwen3} at $\theta=0.75$ is the only combination in the entire
+matrix that hits 1.000. Latency at this point ($\sim$3.05~s P95) is
+dominated by the lock-hold delay (750~ms per write $\times$ a queue of
+$\sim$4 agents at any moment), not by embedding cost. Lowering
+$\theta$ to 0.55 increases the latency to $\sim$5.3~s without improving
+the score, because the additional queue depth comes from cross-domain
+false positives. The operating-point recommendation
+(\texttt{qwen3}, $\theta=0.75$) is therefore not a Pareto compromise
+but a Pareto-dominant choice for this corpus.
+
+\subsection{Matrix Benchmark Results}
+\label{sec:eval-matrix}
+
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}[b]{0.49\columnwidth}
+    \includegraphics[width=\textwidth]{scripts/plots/matrix/matrix_02_fairness_by_theta.png}
+    \caption{Wait fairness vs.\ $\theta$.}
+    \label{fig:fairness}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.49\columnwidth}
+    \includegraphics[width=\textwidth]{scripts/plots/matrix/matrix_03_blocked_rate_by_theta.png}
+    \caption{Blocked rate vs.\ $\theta$.}
+    \label{fig:blocked}
+  \end{subfigure}
+  \caption{Matrix results. At $\theta=0.75$, fairness and blocked rate
+    are essentially model-agnostic: the rebalancer dominates. At
+    $\theta=0.55$, the larger models (\texttt{bge}, \texttt{qwen})
+    block far more cross-domain pairs, degrading fairness and
+    inflating blocked rate.}
+  \label{fig:matrix}
+\end{figure}
+
+Figure~\ref{fig:matrix} reports the two cluster-wide metrics across
+the full matrix. \textbf{Wait fairness} is computed as the inverse of
+the standard deviation of normalized lock-wait times within a case;
+higher means waiters experienced similar waits. \textbf{Blocked rate}
+is the fraction of operations that observed
+\texttt{lock\_wait\_ms}$>$0.
+
+\paragraph{Model-agnostic at the operating point.}
+At $\theta=0.75$, all three models converge to within 0.05 fairness
+and 0.06 blocked rate. The rebalancer is doing the same work
+regardless of which model produced the embeddings, and the differences
+in conflict-set composition wash out at this threshold for our 13-case
+suite. This is the regime in which DSCC's lock-table behavior is
+\emph{model-independent}.
+
+\paragraph{Model-specific at extremes.} At $\theta=0.55$, \texttt{bge}
+and \texttt{qwen} block over 70\% of operations (vs.\ 67.9\% for
+\texttt{all-minilm}); their fairness also drops because the queue
+contains many cross-domain pairs that should not be there. At
+$\theta=0.95$, all models converge to lower blocked rates because
+fewer conflicts trigger, but \texttt{qwen} loses some paraphrase
+recall.
+
+\subsection{Resource Utilization}
+\label{sec:eval-res}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{scripts/plots/benchmark_run_1775079153/timing_05_resource_heatmaps.png}
+  \caption{Per-container CPU, memory, and network heatmaps over the
+    full 13-case run. The leader (here \texttt{dscc-node-1}) carries
+    most of the conflict-detection and Raft-proposal CPU; followers
+    spike on \texttt{AppendEntries} but otherwise sit at near-zero;
+    Qdrant is essentially flat. Memory grows monotonically because the
+    Raft log is in-memory and uncompacted.}
+  \label{fig:resources}
+\end{figure}
+
+Figure~\ref{fig:resources} shows three heatmaps (CPU, memory, network)
+across all eight containers and time. Three observations.
+
+\paragraph{Leader/follower asymmetry.}
+The leader's CPU is roughly $4\times$ a follower's: the leader runs
+the conflict scan, the proposal logic, and the rebalancer; followers
+run only the APPLY callback and the heartbeat-receive path. This
+asymmetry is structural---there is no work followers can take off the
+leader's hands without changing the protocol.
+
+\paragraph{Memory growth pattern.}
+Every container's memory grows monotonically over the run. This is
+the in-memory Raft log: every \textsc{acquire} and \textsc{release}
+appends an entry to a \texttt{vector<LogEntry>} that is never
+compacted. At our test scale ($<$10{,}000 ops), this is not a problem;
+at long-running deployment scale, log compaction via snapshots is
+required (\S\ref{sec:limitations}).
+
+\paragraph{Network usage.}
+Inter-node network traffic is dominated by \texttt{AppendEntries}
+heartbeats; even on idle, each follower receives $\sim$13 messages/sec.
+Qdrant's network is bursty around C13 (the most write-intensive case)
+and otherwise modest. The proxy adds a fixed forwarding cost per
+operation but no fan-out.
+
+\subsection{Locust Load Testing}
+\label{sec:eval-locust}
+
+We ran sustained Locust workloads to characterize steady-state
+throughput at saturation. Two workloads:
+
+\begin{itemize}
+\item \textbf{Read-only}: 46~RPS sustained, median 7~ms, P95 13~ms.
+\item \textbf{Write workload}: 32~RPS sustained, median 10~ms, P95
+  68~ms.
+\end{itemize}
+
+\paragraph{Interpreting the write P95.}
+A single \texttt{AcquireGuard} that completes consensus in one
+heartbeat round-trip incurs at least one heartbeat period
+(75~ms) plus per-RPC overhead. With 4 followers replicating in
+parallel, the dominant latency component is the slowest single
+\texttt{AppendEntries} RPC. Empirically, P95 of 68~ms indicates that
+most operations complete \emph{within a single AppendEntries cycle}
+without needing a second heartbeat tick; the 2-heartbeat upper bound
+($\sim$150~ms) is reached only on the long tail. This is consistent
+with a healthy local-network deployment.
+
+\paragraph{Read latency floor.}
+The read-only P95 of 13~ms matches the ``no Raft'' floor: read
+admissions still go through \texttt{wait\_for\_admission} but
+typically find no conflict, then propose a no-op
+\textsc{acquire}/\textsc{release} pair on Raft. Their latency is
+dominated by Qdrant search (5--10~ms) plus gRPC overhead.
+
+\subsection{CAP Positioning}
+\label{sec:eval-cap}
+
+DSCC takes the CP corner of the CAP triangle. Under partition, the
+minority partition cannot reach quorum: \texttt{Propose} on the
+minority's leader (if any) times out, \texttt{remove\_pending} cleans
+up the local pending slot, and the compensating-RELEASE branch fires.
+Clients in the minority partition see \texttt{UNAVAILABLE} until the
+partition heals or they reconnect to the majority through the proxy.
+
+\paragraph{\textbf{Why this is the right choice.}}
+The hazard we are protecting against---a semantic race condition---is
+permanent and silently corrupting. The hazard from sacrificing
+availability is bounded and visible: a client receives a clear
+\texttt{UNAVAILABLE} status and can retry, fail fast, or buffer. Even
+in classical key-based systems, choosing AP over CP means accepting
+write conflicts that must be reconciled later; in our setting, the
+``later'' is impossible because the conflicts are not surfaced as
+key collisions but as semantic duplicates. We therefore chose CP
+without ambiguity, and the partition behavior is exercised explicitly
+in C6 (Ghost Client) and in the e2e demo's quorum-collapse phase.
+
+%% =====================================================================
+\section{Limitations and Future Work}
+\label{sec:limitations}
+
+We document the limitations identified through both design review and
+empirical testing, and outline concrete directions for resolution.
+
+\paragraph{Sequential vote collection.} (\S\ref{sec:raft-limit})
+Election worst-case latency is $O(N\times\textsc{rpc\_timeout})$.
+\emph{Manifests} when the cluster recovers from a leader failure on a
+high-RTT network. \emph{Impact}: $\sim$few seconds of unavailability,
+proportional to RPC timeouts. \emph{Fix}: spawn one \texttt{std::async}
+or \texttt{co\_await} per peer and tally votes on a shared
+\texttt{atomic<int>} with cancellation once quorum is reached.
+
+\paragraph{Absence of pre-vote.} (\S\ref{sec:raft-limit})
+A previously partitioned node disrupts the cluster on rejoin.
+\emph{Manifests} after any flap of a single node's network. \emph{Impact}:
+spurious leader elections, $\sim$1~s availability gap each time.
+\emph{Fix}: implement Raft thesis pre-vote~\cite{raft-thesis} as a
+no-side-effect dry-run before incrementing the term.
+
+\paragraph{gRPC channel backoff sensitivity.} A dropped packet can
+push a channel into backoff and silence heartbeats. \emph{Fix}: enable
+\texttt{GRPC\_ARG\_KEEPALIVE\_TIME\_MS} and tune
+\texttt{GRPC\_ARG\_KEEPALIVE\_TIMEOUT\_MS}; add an application-level
+heartbeat-budget retry loop.
+
+\paragraph{In-memory Raft log without snapshots.} A node restart
+loses log state. \emph{Fix}: a memory-mapped WAL with
+\texttt{fdatasync} on commit, periodic snapshots of the lock table,
+and a working \texttt{InstallSnapshot} so the leader can ship
+compacted history to lagging or fresh followers.
+
+\paragraph{No lock TTL or lease-based expiry.} A crashed agent
+holds its lock until the leader-sweep mechanism on the next leader
+change cleans it up. \emph{Manifests} when an agent crashes mid-write.
+\emph{Impact}: blocked semantic region until next leader change.
+\emph{Fix}: each lock carries a server-issued lease (e.g., 30~s);
+agents heartbeat to renew. Expiry triggers a Raft \textsc{release}.
+
+\paragraph{No lock-ownership enforcement on release.} Any caller can
+\texttt{ReleaseGuard} any \texttt{agent\_id}. \emph{Fix}: issue a
+fenced token on grant; require the same token on release.
+
+\paragraph{No embedding-dimension validation.} Two agents with
+mismatched dimensions cannot be compared; current code silently returns
+\texttt{cosine=0.0f}. \emph{Fix}: validate dimensions on admission and
+reject with \texttt{INVALID\_ARGUMENT}.
+
+\paragraph{Reads pass through semantic admission.} A read-only
+operation still acquires a (read-blocking) semantic lock if its
+embedding overlaps an active write. This is conservative-correct but
+sacrifices read throughput. \emph{Fix}: introduce a separate read-set
+admission predicate and allow concurrent reads on the same semantic
+region as long as no write is active.
+
+\paragraph{Asymmetric threshold semantics.} The conflict check uses
+the incoming request's $\theta$, not the active lock's. A conservative
+client is therefore protected, but a permissive client can ``escape''
+a strict lock that would have blocked it. \emph{Fix}: accept either
+\textsc{min} or \textsc{max} as a deployment-level rule, or require
+each client to pass both an admission threshold and a willing-to-be-
+blocked-at threshold.
+
+\paragraph{Future: semantic lock federation.} For very large
+deployments with diverse semantic domains, the leader's $O(n)$ scan
+becomes a bottleneck. A natural fix is to partition the lock space by
+embedding-cluster: each shard owns a region of the unit sphere and runs
+its own DSCC cluster, with a routing layer dispatching incoming
+requests to the shard whose centroid is closest. The federation layer
+must guarantee that any pair of conflicting requests lands on the same
+shard, which requires either a deterministic routing function on the
+embedding (e.g., LSH) or a coordinator that consults all shards on
+admission.
+
+\paragraph{Future: parallel vote collection and durable Raft log.}
+The two engineering simplifications above are the obvious next
+production hardening steps.
+
+\paragraph{Future: alternative embedding modalities.} The lock table is
+modality-agnostic. Substituting an image, audio, or multimodal embedder
+gives \emph{semantic locks over multimedia}. The same correctness
+calibration methodology of \S\ref{sec:embedding} would apply: pick a
+threshold by sweeping a benchmark of expected-conflict and
+expected-distinct pairs.
+
+%% =====================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+The rise of LLM-driven multi-agent systems creates a new class of
+shared-memory hazard: two agents independently persisting the same
+piece of knowledge expressed in different words. Classical key-based
+locking and database concurrency control cannot detect this hazard;
+it is a property of payload meaning rather than payload identity.
+
+We presented \textbf{DSCC}, the Distributed Semantic Conflict
+Controller, which takes the standard quorum-replicated lock-manager
+architecture and extends its conflict predicate from key equality to
+cosine similarity over embedding vectors. The technical core of the
+system is the \textbf{ActiveLockTable}, an in-memory data structure
+with $O(1)$ keyed lookup, per-lock FIFO waiter deques, and per-waiter
+condition variables, paired with a cascading-grant rebalancer that
+preserves FIFO fairness within every conflict group while granting as
+many waiters as possible per release. The integration with a five-node
+Raft cluster is mediated by a two-phase admission protocol whose
+\emph{pending-slot} reservation closes the race between local
+admission and durable cluster agreement, with a deterministic
+compensating-RELEASE path that prevents \emph{ghost locks}.
+
+Empirically, DSCC sustains 32~RPS write throughput at 10~ms median and
+68~ms P95 latency under sustained Locust load, with the P95 well
+below the 2-heartbeat ($\sim$150~ms) upper bound expected from Raft.
+The choice of embedding model is decisive: across our 117-run matrix,
+only \texttt{qwen3-embedding:0.6b} at $\theta{=}0.75$ achieves a
+perfect 1.000 serialization score on the Paraphrase Gauntlet,
+whereas \texttt{all-minilm} at the same threshold misses half of all
+paraphrase conflicts. This makes the embedding model an architectural
+commitment that controls the geometry of the lock space itself.
+
+Looking forward, DSCC suggests a more general principle for
+memory-safe multi-agent architectures: the conflict predicate should
+operate in the representation space the agents themselves reason
+in, not in an underlying identifier space invisible to them. As
+multi-agent systems scale toward many tens of cooperating LLM agents
+sharing persistent memory---and as those memories grow to encompass
+multimedia and structured knowledge graphs---semantic concurrency
+control of the kind DSCC pioneers will be a load-bearing component of
+the runtime, not an optional add-on.
+
+%% =====================================================================
+\section*{Author Contributions}
+
+\textbf{Ashwattha Phatak} designed and implemented the
+\texttt{AcquireGuard} critical path, the \texttt{ActiveLockTable}
+(per-waiter CV design, the cascading-grant rebalancer, pending-lock
+semantics, and the cascading grant effect), the gRPC proto
+definitions, and the embedding model evaluation study, including the
+calibration methodology and the Paraphrase Gauntlet design.
+
+\textbf{Ayush Gala} designed and implemented the Raft consensus layer
+(\texttt{RaftNode}), the leader election and log replication
+subsystems, the orphan-sweep and ghost-lock prevention paths, the
+benchmark harness (all 13 scenarios and the matrix runner), the
+Locust load-testing framework, and the leader-aware
+\texttt{dscc-proxy}.
+
+%% =====================================================================
+\begin{acks}
+This work was completed as the final project for CSC\,724: Advanced
+Topics in Distributed Systems at North Carolina State University,
+Spring 2026. We thank the course instructors for their detailed
+feedback and for providing the computational resources used in
+benchmarking.
+\end{acks}
+
+%%
+%% The next two lines define the bibliography style to be used, and
+%% the bibliography file.
+% \bibliographystyle{ACM-Reference-Format}
+% \begin{thebibliography}{14}
+
+% \bibitem{gray1975granularity}
+% Gray, J.N., Lorie, R.A., Putzolu, G.R. and Traiger, I.L., 1975. Granularity of locks and degrees of consistency in a shared data base. \textit{IFIP Working Conference on Modelling in Data Base Management Systems}, pp. 365-394.
+
+% \bibitem{eswaran1976notions}
+% Eswaran, K.P., Gray, J.N., Lorie, R.A. and Traiger, I.L., 1976. The notions of consistency and predicate locks in a database system. \textit{Communications of the ACM}, 19(11), pp.624-633.
+
+% \bibitem{kung1981optimistic}
+% Kung, H.T. and Robinson, J.T., 1981. On optimistic methods for concurrency control. \textit{ACM Transactions on Database Systems (TODS)}, 6(2), pp.213-226.
+
+% \bibitem{bernstein1981concurrency}
+% Bernstein, P.A. and Goodman, N., 1981. Concurrency control in distributed database systems. \textit{ACM Computing Surveys (CSUR)}, 13(2), pp.185-221.
+
+% \bibitem{malkov2018efficient}
+% Malkov, Y.A. and Yashunin, D.A., 2018. Efficient and robust approximate nearest neighbor search using hierarchical navigable small world graphs. \textit{IEEE Transactions on Pattern Analysis and Machine Intelligence}, 42(4), pp.824-836.
+
+% \bibitem{johnson2019billion}
+% Johnson, J., Douze, M. and Jégou, H., 2019. Billion-scale similarity search with GPUs. \textit{IEEE Transactions on Big Data}, 7(3), pp.535-547.
+
+% \bibitem{ciaccia1997mtree}
+% Ciaccia, P., Patella, M. and Zezula, P., 1997. M-tree: An efficient access method for similarity search in metric spaces. \textit{VLDB}, 97, pp.426-435.
+
+% \bibitem{weber1998quantitative}
+% Weber, R., Schek, H.J. and Blott, S., 1998. A quantitative analysis and performance study for similarity-search methods in high-dimensional spaces. \textit{VLDB}, 98, pp.194-205.
+
+% \bibitem{park2023generative}
+% Park, J.S., O'Brien, J.C., Cai, C.J., Morris, M.R., Liang, P. and Bernstein, M.S., 2023. Generative agents: Interactive simulacra of human behavior. \textit{Proceedings of the 36th Annual ACM Symposium on User Interface Software and Technology}, pp. 1-22.
+
+% \bibitem{lewis2020retrieval}
+% Lewis, P., Perez, E., Piktus, A., Petroni, F., Karpukhin, V., Goyal, N., ... \& Kiela, D., 2020. Retrieval-augmented generation for knowledge-intensive nlp tasks. \textit{Advances in Neural Information Processing Systems}, 33.
+
+% \bibitem{packer2024memgpt}
+% Packer, C., Fang, V., Patil, S.G., Lin, K., Wooders, S. and Gonzalez, J.E., 2024. MemGPT: Towards LLMs as Operating Systems. \textit{arXiv preprint arXiv:2310.08560}.
+
+% \bibitem{shinn2023reflexion}
+% Shinn, N., Cassano, F., Gopinath, A., Narasimhan, K. and Yao, S., 2023. Reflexion: Language agents with verbal reinforcement learning. \textit{Advances in Neural Information Processing Systems}, 36.
+
+% \bibitem{xi2023rise}
+% Xi, Z., Chen, W., Guo, X., He, W., Ding, Y., Hong, B. and Zhang, M., 2023. The rise and potential of large language model based agents: A survey. \textit{arXiv preprint arXiv:2309.07864}.
+
+% \bibitem{zhang2023collaborative}
+% Zhang, H., Du, W., Shan, J., Zhou, Q., Du, Y., Tunc, C. and Hua, G., 2023. Building cooperative embodied agents modularly with large language models. \textit{arXiv preprint arXiv:2307.02485}.
+
+% \end{thebibliography}
+
+\bibliographystyle{ACM-Reference-Format}
+\begin{thebibliography}{99}
+
+\bibitem{chubby}
+M.~Burrows.
+\newblock The {Chubby} lock service for loosely-coupled distributed systems.
+\newblock In {\em Proc.\ 7th USENIX OSDI}, pages 335--350, 2006.
+
+\bibitem{zookeeper}
+P.~Hunt, M.~Konar, F.~P. Junqueira, and B.~Reed.
+\newblock {ZooKeeper}: Wait-free coordination for internet-scale systems.
+\newblock In {\em Proc.\ USENIX ATC}, 2010.
+
+\bibitem{etcd}
+{etcd Authors}.
+\newblock {etcd}: A distributed, reliable key-value store for the most
+  critical data of a distributed system.
+\newblock \url{https://etcd.io}, 2024.
+
+\bibitem{redlock}
+S.~Sanfilippo.
+\newblock Distributed locks with {Redis}.
+\newblock \url{https://redis.io/docs/manual/patterns/distributed-locks/}, 2016.
+
+\bibitem{paxos}
+L.~Lamport.
+\newblock The part-time parliament.
+\newblock {\em ACM Transactions on Computer Systems}, 16(2):133--169, 1998.
+
+\bibitem{raft}
+D.~Ongaro and J.~Ousterhout.
+\newblock In search of an understandable consensus algorithm.
+\newblock In {\em Proc.\ USENIX ATC}, pages 305--320, 2014.
+
+\bibitem{raft-thesis}
+D.~Ongaro.
+\newblock {\em Consensus: Bridging Theory and Practice}.
+\newblock PhD thesis, Stanford University, 2014.
+
+\bibitem{cockroachdb}
+R.~Taft, I.~Sharif, A.~Matei, N.~VanBenschoten, J.~Lewis, T.~Grieger,
+  K.~Niemi, A.~Woods, A.~Birzin, R.~Poss, P.~Bardea, A.~Ranade,
+  B.~Darnell, B.~Gruneir, J.~Jaffray, L.~Zhang, and P.~Mattis.
+\newblock {CockroachDB}: The resilient geo-distributed {SQL} database.
+\newblock In {\em Proc.\ ACM SIGMOD}, pages 1493--1509, 2020.
+
+\bibitem{gray1976granularity}
+J.~N. Gray, R.~A. Lorie, G.~R. Putzolu, and I.~L. Traiger.
+\newblock Granularity of locks and degrees of consistency in a shared data
+  base.
+\newblock In {\em Modelling in Data Base Management Systems}, pages 365--394.
+  North-Holland, 1976.
+
+\bibitem{kung1981optimistic}
+H.~T. Kung and J.~T. Robinson.
+\newblock On optimistic methods for concurrency control.
+\newblock {\em ACM Transactions on Database Systems}, 6(2):213--226, 1981.
+
+\bibitem{bernstein1983multiversion}
+P.~A. Bernstein and N.~Goodman.
+\newblock Multiversion concurrency control --- theory and algorithms.
+\newblock {\em ACM Transactions on Database Systems}, 8(4):465--483, 1983.
+
+\bibitem{garcia-molina1983}
+H.~Garcia-Molina and K.~Salem.
+\newblock Semantic concurrency control.
+\newblock In {\em Proc.\ ACM SIGMOD}, pages 220--224, 1983.
+
+\bibitem{qdrant}
+{Qdrant Team}.
+\newblock {Qdrant}: Vector similarity search engine and vector database.
+\newblock \url{https://qdrant.tech}, 2023.
+
+\bibitem{weaviate}
+{Weaviate B.V.}
+\newblock {Weaviate}: An open-source vector database.
+\newblock \url{https://weaviate.io}, 2024.
+
+\bibitem{pinecone}
+{Pinecone Systems}.
+\newblock {Pinecone}: Managed vector database for {ML} applications.
+\newblock \url{https://www.pinecone.io}, 2024.
+
+\bibitem{pgvector}
+A.~Kane.
+\newblock {pgvector}: Open-source vector similarity search for {Postgres}.
+\newblock \url{https://github.com/pgvector/pgvector}, 2024.
+
+\bibitem{faiss}
+J.~Johnson, M.~Douze, and H.~J\'{e}gou.
+\newblock Billion-scale similarity search with {GPUs}.
+\newblock {\em IEEE Transactions on Big Data}, 7(3):535--547, 2021.
+
+\bibitem{hnswlib}
+Y.~A. Malkov and D.~A. Yashunin.
+\newblock Efficient and robust approximate nearest neighbor search using
+  {Hierarchical Navigable Small World} graphs.
+\newblock {\em IEEE Transactions on Pattern Analysis and Machine Intelligence},
+  42(4):824--836, 2020.
+
+\bibitem{langgraph}
+{LangChain, Inc.}
+\newblock {LangGraph}: Building stateful, multi-actor applications with
+  {LLMs}.
+\newblock \url{https://github.com/langchain-ai/langgraph}, 2024.
+
+\bibitem{autogen}
+Q.~Wu, G.~Bansal, J.~Zhang, Y.~Wu, B.~Li, E.~Zhu, L.~Jiang, X.~Zhang,
+  S.~Zhang, J.~Liu, A.~Awadallah, R.~White, D.~Burger, and C.~Wang.
+\newblock {AutoGen}: Enabling next-gen {LLM} applications via multi-agent
+  conversation.
+\newblock {\em arXiv preprint arXiv:2308.08155}, 2023.
+
+\bibitem{park2023generative}
+J.~S. Park, J.~C. O'Brien, C.~J. Cai, M.~R. Morris, P.~Liang, and
+  M.~S. Bernstein.
+\newblock Generative agents: Interactive simulacra of human behavior.
+\newblock In {\em Proc.\ 36th ACM UIST}, 2023.
+
+\bibitem{yao2023react}
+S.~Yao, J.~Zhao, D.~Yu, N.~Du, I.~Shafran, K.~Narasimhan, and Y.~Cao.
+\newblock {ReAct}: Synergizing reasoning and acting in language models.
+\newblock In {\em Proc.\ 11th ICLR}, 2023.
+
+\bibitem{reimers2019sbert}
+N.~Reimers and I.~Gurevych.
+\newblock {Sentence-BERT}: Sentence embeddings using {Siamese}
+  {BERT}-networks.
+\newblock In {\em Proc.\ EMNLP-IJCNLP}, pages 3982--3992, 2019.
+
+\bibitem{bge}
+S.~Xiao, Z.~Liu, P.~Zhang, and N.~Muennighoff.
+\newblock {C-Pack}: Packed resources for general {C}hinese embeddings.
+\newblock In {\em Proc.\ ACM SIGIR}, pages 641--649, 2024.
+
+\bibitem{e5}
+L.~Wang, N.~Yang, X.~Huang, B.~Jiao, L.~Yang, D.~Jiang, R.~Majumder,
+  and F.~Wei.
+\newblock Text embeddings by weakly-supervised contrastive pre-training.
+\newblock {\em arXiv preprint arXiv:2212.03533}, 2022.
+
+\bibitem{qwen3}
+{Qwen Team}.
+\newblock {Qwen3}: An open foundation model series including embedding
+  variants.
+\newblock \url{https://qwenlm.github.io/blog/qwen3/}, 2025.
+
+\bibitem{locust}
+{Locust Contributors}.
+\newblock Locust: An open-source load testing tool.
+\newblock \url{https://locust.io}, 2024.
+
+\end{thebibliography}
+
+
+
+\end{document}
