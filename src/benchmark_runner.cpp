@@ -68,7 +68,7 @@ struct Config {
     std::string qdrant_port = "6333";
     std::string dscc_target = "127.0.0.1:50050";
     std::vector<std::string> node_targets = {
-        "127.0.0.1:50051",
+        "127.0.0.1:50056",
         "127.0.0.1:50052",
         "127.0.0.1:50053",
         "127.0.0.1:50054",
@@ -92,6 +92,7 @@ struct Config {
     int soak_snapshot_sec = 60;
     float soak_theta = 0.75f;
     int soak_lock_hold_ms = 500;
+    int force_lock_hold_ms = -1;  // when >= 0, overrides non-zero per-case lock_hold_ms
     std::string soak_output_path;
 };
 
@@ -490,6 +491,10 @@ Config load_config() {
         if (!v.empty()) { config.soak_lock_hold_ms = std::stoi(v); }
     }
     config.soak_output_path = getenv_or_default("DSLM_SOAK_OUTPUT", "");
+    {
+        const std::string v = getenv_or_default("DSLM_FORCE_LOCK_HOLD_MS", "");
+        if (!v.empty()) { config.force_lock_hold_ms = std::stoi(v); }
+    }
     config.matrix_profile_filter = getenv_or_default("DSLM_MATRIX_PROFILE", "");
     {
         const std::string v = getenv_or_default("DSLM_MATRIX_THETA", "");
@@ -1288,6 +1293,13 @@ std::vector<BenchmarkCase> build_curated_cases(const Config& config) {
                               ArrivalMode::kStaggered,
                               30,
                               config));
+    if (config.force_lock_hold_ms >= 0) {
+        for (auto& c : cases) {
+            if (c.lock_hold_ms > 0) {
+                c.lock_hold_ms = config.force_lock_hold_ms;
+            }
+        }
+    }
     return cases;
 }
 

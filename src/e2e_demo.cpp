@@ -88,7 +88,7 @@ struct Config {
     std::string dscc_target     = "127.0.0.1:50050";
 
     std::vector<std::string> node_targets = {
-        "127.0.0.1:50051", "127.0.0.1:50052", "127.0.0.1:50053",
+        "127.0.0.1:50056", "127.0.0.1:50052", "127.0.0.1:50053",
         "127.0.0.1:50054", "127.0.0.1:50055",
     };
     std::vector<std::string> node_service_names = {

@@ -63,7 +63,7 @@ struct Config {
 
     // this is currently hardcoded to the testbench. We need to make sure we dynamically populate this map.
     std::vector<std::string> node_targets = {
-        "127.0.0.1:50051",
+        "127.0.0.1:50056",
         "127.0.0.1:50052",
         "127.0.0.1:50053",
         "127.0.0.1:50054",

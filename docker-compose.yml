@@ -39,7 +39,7 @@ services:
       - qdrant
       - embedding-service
     ports:
-      - "50051:50051"
+      - "50056:50051"
       - "50061:50061"
 
   dscc-node-2:

@@ -64,6 +64,9 @@ CASE_GROUPS = {
     8: "hotspot",
     9: "mixed",
     10: "hotspot",
+    11: "hotspot",   # Paraphrase Gauntlet — semantic overlap stress
+    12: "mixed",     # Cross-Domain Flood — parallelism + false-positive test
+    13: "mixed",     # Write Pressure Ratchet — reader fairness under load
 }
 
 
@@ -148,6 +151,14 @@ def pretty_service_name(raw: str) -> str:
 
 def case_color(case: dict[str, Any]) -> str:
     return GROUP_COLORS.get(case_group(case), CASE_BLUE)
+
+
+def apply_xlabels(axes: Any, labels: list[str]) -> None:
+    """Apply rotated x-tick labels uniformly across one or more axes."""
+    target = axes.flat if hasattr(axes, "flat") else axes
+    for axis in target:
+        axis.set_xticks(np.arange(len(labels)))
+        axis.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
 
 
 def annotate_bars(ax: Any, bars: Iterable[Any], fmt: str = "{:.0f}", pad: float = 3.0) -> None:
@@ -332,9 +343,8 @@ def plot_wait_time_summary(cases: list[dict[str, Any]], output_dir: Path) -> Pat
     axes[1, 1].set_ylabel("Percent")
     annotate_bars(axes[1, 1], blocked_fraction_bars, fmt="{:.0f}%")
 
+    apply_xlabels(axes, labels)
     for axis in axes.flat:
-        axis.set_xticks(x_positions)
-        axis.set_xticklabels(labels)
         axis.grid(True, axis="y", linestyle="--", linewidth=0.6, alpha=0.7)
 
     axes[0, 0].legend(handles=timing_legend(), frameon=True, loc="upper right")
@@ -357,7 +367,6 @@ def plot_latency_component_breakdown(cases: list[dict[str, Any]], output_dir: Pa
     avg_qdrant = np.array([item["avg_qdrant_ms"] for item in stats])
     avg_post = np.array([item["avg_post_qdrant_ms"] for item in stats])
     avg_other = np.array([item["avg_other_ms"] for item in stats])
-    avg_elapsed = np.array([item["avg_elapsed_ms"] for item in stats])
 
     axes[0].bar(x_positions, avg_wait, label="Queue Wait", color=WAIT)
     axes[0].bar(
@@ -381,17 +390,9 @@ def plot_latency_component_breakdown(cases: list[dict[str, Any]], output_dir: Pa
         label="Other Overhead",
         color=GRID,
     )
-    axes[0].plot(
-        x_positions,
-        avg_elapsed,
-        color=TEXT,
-        marker="o",
-        linewidth=1.8,
-        label="Average Elapsed",
-    )
     axes[0].set_title("Average Latency Breakdown Per Successful Operation")
     axes[0].set_ylabel("Milliseconds")
-    axes[0].legend(frameon=True, ncol=5, loc="upper right")
+    axes[0].legend(frameon=True, ncol=4, loc="upper right")
 
     width = 0.38
     wait_p95_bars = axes[1].bar(
@@ -414,9 +415,8 @@ def plot_latency_component_breakdown(cases: list[dict[str, Any]], output_dir: Pa
     annotate_bars(axes[1], wait_p95_bars, fmt="{:.0f}")
     annotate_bars(axes[1], latency_p95_bars, fmt="{:.0f}")
 
+    apply_xlabels(axes, labels)
     for axis in axes:
-        axis.set_xticks(x_positions)
-        axis.set_xticklabels(labels)
         axis.grid(True, axis="y", linestyle="--", linewidth=0.6, alpha=0.7)
 
     fig.tight_layout()
@@ -500,9 +500,8 @@ def plot_hotspot_vs_cold_wait(cases: list[dict[str, Any]], output_dir: Path) -> 
                 color=TEXT,
             )
 
+    apply_xlabels(axes, labels)
     for axis in axes:
-        axis.set_xticks(x_positions)
-        axis.set_xticklabels(labels)
         axis.grid(True, axis="y", linestyle="--", linewidth=0.6, alpha=0.7)
 
     fig.tight_layout()
@@ -564,6 +563,133 @@ def plot_queue_depth_vs_wait(cases: list[dict[str, Any]], output_dir: Path) -> P
     axes[0].legend(handles=timing_legend(), frameon=True, loc="lower right", title="Scenario Group")
     fig.tight_layout()
     path = output_dir / "timing_04_queue_depth_vs_wait.png"
+    fig.savefig(path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def plot_wait_fairness(cases: list[dict[str, Any]], output_dir: Path) -> Path:
+    import statistics as _stats
+
+    labels = [case_label(case, width=16) for case in cases]
+    x = np.arange(len(cases))
+
+    avgs, stds, maxs = [], [], []
+    for case in cases:
+        waits = [op["lock_wait_ms"] for op in case.get("operations", []) if op.get("granted")]
+        avgs.append(_stats.mean(waits) if waits else 0.0)
+        stds.append(_stats.stdev(waits) if len(waits) > 1 else 0.0)
+        maxs.append(max(waits) if waits else 0.0)
+
+    avgs_arr = np.array(avgs)
+    stds_arr = np.array(stds)
+    maxs_arr = np.array(maxs)
+
+    fig, ax = plt.subplots(figsize=(16, 7))
+
+    bars = ax.bar(x, avgs_arr, color=WAIT, alpha=0.85, label="Mean wait (ms)", zorder=3)
+    lower = np.minimum(stds_arr, avgs_arr)
+    ax.errorbar(x, avgs_arr, yerr=[lower, stds_arr], fmt="none", color=TEXT,
+                capsize=5, capthick=1.5, linewidth=1.5, label="±1 std dev", zorder=4)
+    ax.scatter(x, maxs_arr, marker="D", color=FAIL, s=40, zorder=5, label="Max wait (ms)")
+
+    annotate_bars(ax, bars, fmt="{:.0f}")
+
+    ax.set_ylabel("Wait Time (ms)")
+    ax.set_title("Agent Wait Time: Mean ± Std Dev and Worst Case — All 13 Cases")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
+    ax.grid(True, axis="y", linestyle="--", linewidth=0.6, alpha=0.7, zorder=0)
+    ax.legend(frameon=True, loc="upper right")
+
+    fig.tight_layout()
+    path = output_dir / "06_wait_fairness.png"
+    fig.savefig(path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def plot_queue_depth_fairness(cases: list[dict[str, Any]], output_dir: Path) -> Path:
+    import statistics as _stats
+
+    labels = [case_label(case, width=16) for case in cases]
+    x = np.arange(len(cases))
+
+    avgs, stds, maxs = [], [], []
+    for case in cases:
+        positions = [op["wait_position"] for op in case.get("operations", []) if op.get("granted")]
+        avgs.append(_stats.mean(positions) if positions else 0.0)
+        stds.append(_stats.stdev(positions) if len(positions) > 1 else 0.0)
+        maxs.append(max(positions) if positions else 0.0)
+
+    avgs_arr = np.array(avgs)
+    stds_arr = np.array(stds)
+    maxs_arr = np.array(maxs)
+
+    fig, ax = plt.subplots(figsize=(16, 7))
+
+    bars = ax.bar(x, avgs_arr, color=CASE_BLUE, alpha=0.85, label="Mean queue position", zorder=3)
+    lower = np.minimum(stds_arr, avgs_arr)
+    ax.errorbar(x, avgs_arr, yerr=[lower, stds_arr], fmt="none", color=TEXT,
+                capsize=5, capthick=1.5, linewidth=1.5, label="±1 std dev", zorder=4)
+    ax.scatter(x, maxs_arr, marker="D", color=FAIL, s=40, zorder=5, label="Max queue position")
+
+    annotate_bars(ax, bars, fmt="{:.1f}")
+
+    ax.set_ylabel("Queue Position (agents ahead)")
+    ax.set_title("Queue Depth: Mean ± Std Dev and Worst Case — All 13 Cases")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
+    ax.grid(True, axis="y", linestyle="--", linewidth=0.6, alpha=0.7, zorder=0)
+    ax.legend(frameon=True, loc="upper right")
+
+    fig.tight_layout()
+    path = output_dir / "07_queue_depth_fairness.png"
+    fig.savefig(path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def plot_correctness_parallelism(cases: list[dict[str, Any]], output_dir: Path) -> Path:
+    labels = [case_label(case, width=16) for case in cases]
+    x = np.arange(len(cases))
+    w = 0.26
+
+    precisions, recalls, f1s = [], [], []
+    for case in cases:
+        m = case["metrics"]
+        exp_conf = int(m.get("expected_conflict_pairs", 0))
+        fn = int(m.get("conflicting_overlap_violations", 0))
+        fp = int(m.get("distinct_nonparallel_pairs", 0))
+        tp = exp_conf - fn
+        prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1   = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+        precisions.append(prec)
+        recalls.append(rec)
+        f1s.append(f1)
+
+    fig, ax = plt.subplots(figsize=(16, 6))
+
+    prec_bars = ax.bar(x - w, precisions, width=w, color=CASE_BLUE,   alpha=0.85, label="Precision")
+    rec_bars  = ax.bar(x,     recalls,    width=w, color=CASE_GREEN,  alpha=0.85, label="Recall")
+    f1_bars   = ax.bar(x + w, f1s,        width=w, color=CASE_PURPLE, alpha=0.85, label="F1")
+
+    annotate_bars(ax, prec_bars, fmt="{:.2f}")
+    annotate_bars(ax, rec_bars,  fmt="{:.2f}")
+    annotate_bars(ax, f1_bars,   fmt="{:.2f}")
+
+    ax.set_ylim(0, 1.22)
+    ax.set_ylabel("Score (0.0 – 1.0)")
+    ax.set_title("Precision / Recall / F1 Across All Cases")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
+    ax.axhline(1.0, color=GRID, linewidth=0.8, linestyle="--", alpha=0.6)
+    ax.grid(True, axis="y", linestyle="--", linewidth=0.6, alpha=0.7)
+    ax.legend(frameon=True, loc="lower right")
+
+    fig.tight_layout()
+    path = output_dir / "02_correctness_parallelism.png"
     fig.savefig(path, dpi=220, bbox_inches="tight")
     plt.close(fig)
     return path
@@ -841,6 +967,9 @@ def generate_plots(
     timelines_dir.mkdir(parents=True, exist_ok=True)
 
     generated = [
+        plot_correctness_parallelism(cases, timings_dir),
+        plot_wait_fairness(cases, timings_dir),
+        plot_queue_depth_fairness(cases, timings_dir),
         plot_wait_time_summary(cases, timings_dir),
         plot_latency_component_breakdown(cases, timings_dir),
         plot_hotspot_vs_cold_wait(cases, timings_dir),
