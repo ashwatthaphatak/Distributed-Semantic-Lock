@@ -1,3 +1,4 @@
+// Author: Ashwattha Phatak
 // Paraphrase Gauntlet × Model Matrix Demo
 //
 // Runs the Paraphrase Gauntlet scenario (case 11) and Cross-Domain Flood

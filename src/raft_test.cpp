@@ -1,3 +1,4 @@
+// Author: Ayush Gala
 // In-process Raft regression testbench: real localhost gRPC, three RaftNode peers.
 // Covers election timing, quorum replication, leader failover, follower catch-up,
 // AppendLocalEntry eventual replication, log truncation on conflict, and

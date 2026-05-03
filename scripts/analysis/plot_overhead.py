@@ -1,3 +1,4 @@
+# Author: Ashwattha Phatak
 #!/usr/bin/env python3
 """Compare a Qdrant-direct baseline locust run to a full DSLM locust run and
 visualise the coordination overhead per persona / operation.

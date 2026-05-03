@@ -1,3 +1,4 @@
+<!-- Author: Ashwattha Phatak -->
 # Embedding Model Evaluation: Findings
 
 **DSLM — Distributed Semantic Lock Manager**

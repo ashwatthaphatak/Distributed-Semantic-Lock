@@ -1,3 +1,4 @@
+# Author: Ashwattha Phatak
 #!/usr/bin/env python3
 """Generate comparison bar charts from a DSLM matrix benchmark CSV.
 
@@ -29,7 +30,7 @@ except ImportError as exc:
     ) from exc
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_LOG_DIR = ROOT / "logs"
 DEFAULT_PLOTS_ROOT = ROOT / "scripts" / "plots" / "matrix"
 

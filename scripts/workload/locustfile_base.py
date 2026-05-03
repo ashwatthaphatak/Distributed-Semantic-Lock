@@ -1,3 +1,4 @@
+# Author: Ayush Gala
 """
 Baseline workload generator — directly targets Qdrant, bypassing the DSLM
 proxy, Raft nodes, and semantic-conflict logic.
@@ -82,7 +83,8 @@ from locust import User, task, events
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+import pathlib as _pathlib
+PROJECT_ROOT = str(_pathlib.Path(__file__).resolve().parents[2])
 DEMO_INPUTS_DIR = os.path.join(PROJECT_ROOT, "demo_inputs")
 
 # ---- Qdrant ----------------------------------------------------------------

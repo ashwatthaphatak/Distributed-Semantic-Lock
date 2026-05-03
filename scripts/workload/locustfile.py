@@ -1,3 +1,4 @@
+# Author: Ayush Gala
 """
 Workload generator for the Distributed Semantic Lock Manager.
 
@@ -64,7 +65,8 @@ from locust import User, task, events
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+import pathlib as _pathlib
+PROJECT_ROOT = str(_pathlib.Path(__file__).resolve().parents[2])
 DEMO_INPUTS_DIR = os.path.join(PROJECT_ROOT, "demo_inputs")
 
 PROXY_TARGET = os.environ.get("DSCC_PROXY", "localhost:50050")
@@ -190,6 +192,10 @@ def _ensure_proto_modules():
     global dscc_pb2, dscc_pb2_grpc
     if dscc_pb2 is not None:
         return
+    import sys as _sys
+    _proto_root = str(_pathlib.Path(__file__).resolve().parents[2])
+    if _proto_root not in _sys.path:
+        _sys.path.insert(0, _proto_root)
     try:
         import dscc_pb2 as _pb2
         import dscc_pb2_grpc as _pb2_grpc

@@ -1,3 +1,4 @@
+// Author: Ashwattha Phatak
 // Choreographed demo for a ~5-minute distributed systems presentation.
 // Drives continuous traffic through the full Docker stack (embedding -> proxy -> Raft nodes -> Qdrant)
 // while executing three scripted chaos scenarios:

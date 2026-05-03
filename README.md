@@ -1,378 +1,149 @@
-# DSCC / DSLM
+# DSCC — Distributed Semantic Concurrency Control
 
-Distributed semantic lock manager in front of Qdrant.
+**Authors: Ashwattha Phatak, Ayush Gala**  
+CSC 724 — Advanced Distributed Systems, NC State University
 
-The system accepts natural-language payloads plus embedding vectors and blocks requests whose cosine similarity to an active semantic lock is greater than or equal to a configured threshold `theta`.
+---
 
-## Architecture
+## What this is
 
-Current end-to-end request path:
+DSCC is a distributed, Raft-replicated semantic lock manager that sits in front of a Qdrant vector database.  
+Instead of locking on key equality, it locks on *meaning*: two requests conflict when the cosine similarity of their embedding vectors is ≥ a configurable threshold θ.
 
-```text
-demo_inputs/*.json
-    -> embedding-service
-    -> dscc-proxy
-    -> current dscc-node leader
-    -> ActiveLockTable
-    -> Raft ACQUIRE replication
-    -> Qdrant read/write
-    -> Raft RELEASE replication
+This lets collaborating AI agents—or any producer/consumer system that works with natural-language data—coordinate access without knowing each other's exact identifiers.
+
+---
+
+## Repository layout
+
+```
+.
+├── src/                    C++ source — lock service, Raft, proxy, benchmarks
+│   ├── active_lock_table.{h,cpp}     Semantic admission table (Ashwattha Phatak)
+│   ├── lock_service_impl.{h,cpp}     gRPC lock service (Ashwattha Phatak)
+│   ├── raft_node.{h,cpp}             Raft consensus engine (Ayush Gala)
+│   ├── raft_service_impl.{h,cpp}     Raft gRPC service (Ayush Gala)
+│   ├── proxy_service_impl.{h,cpp}    Leader-aware proxy (Ayush Gala)
+│   ├── proxy_main.cpp                Proxy entrypoint (Ayush Gala)
+│   ├── main.cpp                      Node entrypoint (Ayush Gala)
+│   ├── threadsafe_log.{h,cpp}        Thread-safe logging (Ayush Gala)
+│   ├── e2e_bench.cpp                 End-to-end integration harness (Ashwattha Phatak)
+│   ├── e2e_demo.cpp                  Interactive demo harness (Ashwattha Phatak)
+│   ├── benchmark_runner.cpp          Curated 13-scenario benchmark (Ayush Gala)
+│   ├── testbench.cpp                 ActiveLockTable unit tests (Ayush Gala)
+│   ├── raft_test.cpp                 Raft regression tests (Ayush Gala)
+│   └── paraphrase_gauntlet_demo.cpp  Cross-model paraphrase study (Ashwattha Phatak)
+│
+├── proto/                  Protobuf / gRPC definitions (Ashwattha Phatak)
+│   ├── dscc.proto          Client-facing LockService API
+│   └── dscc_raft.proto     Internal Raft RPC messages
+│
+├── scripts/
+│   ├── workload/                     Workload generators — produce logs
+│   │   ├── locustfile.py             Full DSLM gRPC load generator (Ayush Gala)
+│   │   ├── locustfile_base.py        Qdrant-direct baseline load generator (Ayush Gala)
+│   │   ├── thundering_herd.py        Standalone burst generator (Ayush Gala)
+│   │   ├── agent_request.sh          Single-agent request helper (Ayush Gala)
+│   │   └── compare_baseline.sh       Runs both workloads + overhead plot (Ayush Gala)
+│   ├── analysis/                     Log processors — read logs/, write plots/
+│   │   ├── plot_matrix_metrics.py    Model comparison plots (Ashwattha Phatak)
+│   │   ├── plot_model_comparison.py  Timing comparison across models (Ashwattha Phatak)
+│   │   ├── plot_overhead.py          Lock-overhead analysis (Ashwattha Phatak)
+│   │   ├── plot_benchmark_report.py  Single-run timing report (Ayush Gala)
+│   │   └── plot_soak_test.py         Soak-test latency plots (Ayush Gala)
+│   └── plots/                        Generated PNG output (gitignored)
+│
+├── demo_inputs/            JSON agent profiles for demo and benchmark runs
+├── logs/                   Generated benchmark output (gitignored)
+├── docker/                 Per-service Dockerfiles
+├── docker-compose.yml      Full local stack definition
+├── CMakeLists.txt          Build system
+├── SETUP.md                Prerequisites, build, run, and test instructions
+├── DEMO.md                 Step-by-step demo walkthrough
+└── MODEL_FINDINGS.md       Experimental results — embedding model comparison
 ```
 
-Main runtime pieces:
+---
 
-- `dscc-node`
-  - lock service + Raft service on each node
-- `dscc-proxy`
-  - leader-aware forwarding layer for client traffic
-- `embedding-service`
-  - embedding generation for demo and benchmark inputs
-- `qdrant`
-  - vector storage and vector search
+## Architecture overview
 
-Main source files:
+```
+Client request (natural-language payload + embedding vector)
+    │
+    ▼
+dscc-proxy  ─── leader poll loop ──▶  (discovers current Raft leader)
+    │
+    ▼ ForwardWithLeaderRetry
+dscc-node (leader)
+    │
+    ├─▶ ActiveLockTable::wait_for_admission()
+    │       cosine_similarity(incoming, each active lock) ≥ θ  →  enqueue
+    │       similarity < θ for all active locks              →  admit
+    │
+    ├─▶ Raft::Propose(ACQUIRE)   ──▶  replicated to 4 followers
+    │
+    ├─▶ Qdrant read / write
+    │
+    └─▶ Raft::Propose(RELEASE)  ──▶  replicated to 4 followers
+            │
+            ▼
+        ActiveLockTable::apply_release()  →  wake next waiter
+```
 
-- [src/active_lock_table.h](/home/ubuntu/cpp_projects/DSLM/src/active_lock_table.h)
-- [src/active_lock_table.cpp](/home/ubuntu/cpp_projects/DSLM/src/active_lock_table.cpp)
-- [src/lock_service_impl.h](/home/ubuntu/cpp_projects/DSLM/src/lock_service_impl.h)
-- [src/lock_service_impl.cpp](/home/ubuntu/cpp_projects/DSLM/src/lock_service_impl.cpp)
-- [src/proxy_service_impl.h](/home/ubuntu/cpp_projects/DSLM/src/proxy_service_impl.h)
-- [src/proxy_service_impl.cpp](/home/ubuntu/cpp_projects/DSLM/src/proxy_service_impl.cpp)
-- [src/raft_node.h](/home/ubuntu/cpp_projects/DSLM/src/raft_node.h)
-- [src/raft_node.cpp](/home/ubuntu/cpp_projects/DSLM/src/raft_node.cpp)
-- [src/e2e_bench.cpp](/home/ubuntu/cpp_projects/DSLM/src/e2e_bench.cpp)
-- [src/benchmark_runner.cpp](/home/ubuntu/cpp_projects/DSLM/src/benchmark_runner.cpp)
+Five DSCC nodes form a Raft cluster. Each node runs both a `LockService` (client-facing) and a `RaftService` (internal replication). The leader-aware proxy discovers the current leader and retries on redirect so clients never need to track leadership themselves.
 
-For a detailed current-state description, see [STATE.md](/home/ubuntu/cpp_projects/DSLM/STATE.md).
+---
 
-## Build
+## Quick start
 
-Configure once:
+See [SETUP.md](SETUP.md) for full prerequisites and build instructions.
 
 ```bash
+# 1. Build the binaries
 cmake -S . -B /tmp/dslm_build
-```
+cmake --build /tmp/dslm_build --target dscc-node dscc-proxy dscc-e2e-bench dscc-benchmark -j"$(nproc)"
 
-Build the main targets:
+# 2. Start the Docker stack
+docker compose up -d --build \
+    qdrant embedding-service \
+    dscc-node-1 dscc-node-2 dscc-node-3 dscc-node-4 dscc-node-5 \
+    dscc-proxy
 
-```bash
-cmake --build /tmp/dslm_build --target dscc-node -j"$(nproc)"
-cmake --build /tmp/dslm_build --target dscc-proxy -j"$(nproc)"
-cmake --build /tmp/dslm_build --target dscc-e2e-bench -j"$(nproc)"
-cmake --build /tmp/dslm_build --target dscc-benchmark -j"$(nproc)"
-```
-
-Useful extra targets:
-
-```bash
-cmake --build /tmp/dslm_build --target dscc-testbench -j"$(nproc)"
-cmake --build /tmp/dslm_build --target dscc-raft-test -j"$(nproc)"
-```
-
-## Demo Inputs
-
-Current seeded inputs live in:
-
-- [demo_inputs/A.json](/home/ubuntu/cpp_projects/DSLM/demo_inputs/A.json)
-- [demo_inputs/B.json](/home/ubuntu/cpp_projects/DSLM/demo_inputs/B.json)
-- [demo_inputs/C.json](/home/ubuntu/cpp_projects/DSLM/demo_inputs/C.json)
-- [demo_inputs/D.json](/home/ubuntu/cpp_projects/DSLM/demo_inputs/D.json)
-- [demo_inputs/E.json](/home/ubuntu/cpp_projects/DSLM/demo_inputs/E.json)
-
-Each file supports:
-
-- `payload`
-- `scheduled_offset_ms`
-- `operation`
-- optional `payload_schedule`
-
-When `payload_schedule` is present, both the e2e harness and the curated benchmark consume the first scheduled entry for that agent/template.
-
-## End-to-End Demo
-
-Run the full demo harness:
-
-```bash
+# 3. Run the end-to-end demo
 /tmp/dslm_build/dscc-e2e-bench
 ```
 
-Run with automatic teardown:
+---
+
+## Running tests
 
 ```bash
-E2E_TEARDOWN=1 /tmp/dslm_build/dscc-e2e-bench
-```
+# In-process unit tests (no Docker needed)
+/tmp/dslm_build/dscc-testbench      # 28 ActiveLockTable scenarios
+/tmp/dslm_build/dscc-raft-test      # 14 Raft regression scenarios
 
-Useful environment variables:
-
-- `DSCC_THETA`
-- `DSCC_LOCK_HOLD_MS`
-- `EMBEDDING_IMAGE`
-- `EMBEDDING_MODEL_ID`
-- `QDRANT_COLLECTION`
-- `E2E_TEARDOWN`
-
-Examples:
-
-```bash
-DSCC_THETA=0.55 /tmp/dslm_build/dscc-e2e-bench
-DSCC_THETA=0.90 DSCC_LOCK_HOLD_MS=1000 /tmp/dslm_build/dscc-e2e-bench
-```
-
-## Curated Benchmark Runner
-
-`dscc-benchmark` runs three experiment modes against the live Docker stack.
-Build it once, then choose a mode below.
-
-```bash
-cmake --build /tmp/dslm_build --target dscc-benchmark -j"$(nproc)"
+# Full integration suite (requires running stack)
+/tmp/dslm_build/dscc-e2e-bench
 ```
 
 ---
 
-### Single mode (default)
+## Key documents
 
-Runs 13 curated scenarios in sequence. Each scenario uses its own per-case
-similarity threshold; the stack is torn down and recreated between cases.
-
-```bash
-E2E_TEARDOWN=1 /tmp/dslm_build/dscc-benchmark
-```
-
-Output: `logs/benchmark_run_<timestamp>.json`
-
-Override the output path:
-
-```bash
-DSLM_BENCH_OUTPUT=/tmp/myrun.json E2E_TEARDOWN=1 /tmp/dslm_build/dscc-benchmark
-```
+| Document | Contents |
+|---|---|
+| [SETUP.md](SETUP.md) | Full build, run, and test reference |
+| [DEMO.md](DEMO.md) | Step-by-step demo walkthrough |
+| [MODEL_FINDINGS.md](MODEL_FINDINGS.md) | Experimental results across embedding models |
+| [src/README.md](src/README.md) | Source module descriptions and authors |
+| [scripts/README.md](scripts/README.md) | Plotting scripts and how to run them |
+| [demo_inputs/README.md](demo_inputs/README.md) | Agent profiles and semantic overlap design |
 
 ---
 
-### Matrix mode
-
-Sweeps all three embedding models across three similarity thresholds
-(θ = 0.55, 0.75, 0.95), running all 13 scenarios for every combination
-(3 × 3 × 13 = 117 case runs total). Results accumulate in one shared CSV file
-and one JSON file per (model, θ) pair.
-
-**Full sweep (all three models):**
-
-```bash
-DSLM_RUN_MODE=matrix E2E_TEARDOWN=1 /tmp/dslm_build/dscc-benchmark
-```
-
-Output: `logs/benchmark_run_<timestamp>_matrix.csv` plus per-combination JSON files.
-
-**Run a single model only** (useful for resuming after a crash):
-
-```bash
-# only bge-m3
-DSLM_RUN_MODE=matrix DSLM_MATRIX_PROFILE=bge E2E_TEARDOWN=1 /tmp/dslm_build/dscc-benchmark
-
-# only qwen3-embedding
-DSLM_RUN_MODE=matrix DSLM_MATRIX_PROFILE=qwen E2E_TEARDOWN=1 /tmp/dslm_build/dscc-benchmark
-```
-
-**Run a single model at a single threshold** (fill in missing rows after a crash):
-
-```bash
-DSLM_RUN_MODE=matrix DSLM_MATRIX_PROFILE=bge DSLM_MATRIX_THETA=0.95 \
-  DSLM_MATRIX_OUTPUT=logs/existing_matrix.csv \
-  E2E_TEARDOWN=1 /tmp/dslm_build/dscc-benchmark
-```
-
-`DSLM_MATRIX_OUTPUT` appends to an existing CSV file if it already exists.
-The plotting script deduplicates rows by (profile, θ, scenario) automatically,
-so it is safe to re-run any combination and append to the same file.
-
-**Matrix environment variables:**
-
-| Variable | Default | Description |
-|---|---|---|
-| `DSLM_RUN_MODE` | `single` | Set to `matrix` to enable sweep |
-| `DSLM_MATRIX_PROFILE` | *(all three)* | Restrict to `ollama`, `bge`, or `qwen` |
-| `DSLM_MATRIX_THETA` | *(all three)* | Restrict to a single θ value, e.g. `0.75` |
-| `DSLM_MATRIX_OUTPUT` | auto-generated | Explicit path for the shared CSV output |
-
----
-
-### Soak mode
-
-Keeps the stack running for an extended period and streams a growing Qdrant
-collection, taking windowed latency snapshots every 60 seconds. Use this to
-verify that lock-wait latency stays flat as the vector DB fills up.
-
-**Default run (2 hours):**
-
-```bash
-DSLM_RUN_MODE=soak E2E_TEARDOWN=1 /tmp/dslm_build/dscc-benchmark
-```
-
-**Short run for a quick sanity check:**
-
-```bash
-DSLM_RUN_MODE=soak DSLM_SOAK_DURATION_MIN=30 E2E_TEARDOWN=1 /tmp/dslm_build/dscc-benchmark
-```
-
-**Adjust the snapshot interval and similarity threshold:**
-
-```bash
-DSLM_RUN_MODE=soak \
-  DSLM_SOAK_DURATION_MIN=120 \
-  DSLM_SOAK_SNAPSHOT_SEC=60 \
-  DSLM_SOAK_THETA=0.75 \
-  DSLM_SOAK_LOCK_HOLD_MS=500 \
-  E2E_TEARDOWN=1 /tmp/dslm_build/dscc-benchmark
-```
-
-Output: `logs/soak_run_<timestamp>.csv`
-
-**Soak environment variables:**
-
-| Variable | Default | Description |
-|---|---|---|
-| `DSLM_SOAK_DURATION_MIN` | `120` | Total run time in minutes |
-| `DSLM_SOAK_SNAPSHOT_SEC` | `60` | How often to write a CSV snapshot row |
-| `DSLM_SOAK_THETA` | `0.75` | Similarity threshold for the soak workload |
-| `DSLM_SOAK_LOCK_HOLD_MS` | `500` | Lock hold duration per operation |
-| `DSLM_SOAK_OUTPUT` | auto-generated | Explicit path for the time-series CSV |
-
----
-
-### Scenario set (all modes)
-
-1. The Thundering Herd
-2. The Semantic Interleaving
-3. The Read-Starvation Trap
-4. The Permissive Sieve
-5. The Strict Sieve
-6. The Ghost Client
-7. The Almost Collision
-8. Queue Hopping
-9. The Mixed Stagger
-10. The 100% Read Stampede
-11. The Paraphrase Gauntlet *(research: paraphrase detection across models)*
-12. The Cross-Domain Flood *(research: specificity across unrelated domains)*
-13. The Write Pressure Ratchet *(research: reader fairness under write load)*
-
----
-
-## Plotting
-
-Install dependencies once:
-
-```bash
-pip install matplotlib numpy pandas
-```
-
-**Matrix sweep — model comparison plots:**
-
-```bash
-# auto-detect the latest *_matrix.csv in logs/
-python3 scripts/plot_matrix_metrics.py
-
-# explicit file
-python3 scripts/plot_matrix_metrics.py logs/benchmark_run_<timestamp>_matrix.csv
-```
-
-Writes 8 PNG files to `scripts/plots/matrix/`.
-
-**Soak test — latency-over-time plots:**
-
-```bash
-# auto-detect the latest soak_run_*.csv in logs/
-python3 scripts/plot_soak_test.py
-
-# explicit file
-python3 scripts/plot_soak_test.py logs/soak_run_<timestamp>.csv
-```
-
-Writes 7 PNG files to `scripts/plots/soak/`.
-
-**Single-run timing report:**
-
-```bash
-python3 scripts/plot_benchmark_report.py logs/benchmark_run_<timestamp>.json
-```
-
-**Multi-model timing comparison:**
-
-```bash
-python3 scripts/plot_model_comparison.py logs/benchmark_run_*.json
-```
-
----
-
-### Benchmark output format
-
-**Live queue events** printed during each case:
-
-```text
-[LOCK_QUEUE]   agent=sustainability_agent_4 waiting_on=sustainability_agent_1 similarity=1.000 queue_position=3 theta=0.550
-[LOCK_REQUEUE] agent=sustainability_agent_4 waiting_on=sustainability_agent_2 similarity=1.000 queue_position=2 queue_hops=1 theta=0.550
-[LOCK_GRANT]   agent=sustainability_agent_4 queue_hops=1 active_locks=1
-```
-
-**Correctness check:** any pair of operations with pairwise similarity ≥ θ must
-not overlap in their active lock intervals. A violation means two conflicting
-requests were both in the critical section at the same time. Violations are
-printed inline and counted in `conflicting_overlap_violations` in the JSON output.
-
-See [MODEL_FINDINGS.md](MODEL_FINDINGS.md) for metric definitions and experimental
-results across the three embedding models.
-
-## Reading the Benchmark Output
-
-### Live queue events
-
-During a case you will now see lines such as:
-
-```text
-[LOCK_QUEUE] agent=sustainability_agent_4 waiting_on=sustainability_agent_1 similarity=1.000 queue_position=3 theta=0.550
-[LOCK_REQUEUE] agent=sustainability_agent_4 waiting_on=sustainability_agent_2 similarity=1.000 queue_position=2 queue_hops=1 theta=0.550
-[LOCK_GRANT] agent=sustainability_agent_4 queue_hops=1 active_locks=1
-```
-
-These come directly from the active lock table and show why a request entered or re-entered a queue.
-
-### Timeline
-
-The per-case timeline shows:
-
-- when a request blocked
-- who blocked it
-- the similarity that caused the block
-- when it was granted
-- queue hops
-- when it released
-- explicit correctness-violation events when two conflicting lock intervals overlap
-
-### Correctness
-
-Benchmark correctness means:
-
-- if two requests have pairwise similarity `>= theta`, they should not overlap in the active critical section
-
-A violation means:
-
-- two conflicting requests were both active at the same time according to the recorded lock-acquire and lock-release timestamps
-
-## Docker
-
-Start the stack manually:
-
-```bash
-docker compose up -d --build qdrant embedding-service dscc-node-1 dscc-node-2 dscc-node-3 dscc-node-4 dscc-node-5 dscc-proxy
-```
-
-Stop it:
-
-```bash
-docker compose down
-```
-
-## Notes
-
-- CMake generates protobuf/gRPC code in the build directory.
-- Generated protobuf files should stay out of the source tree.
-- `STATE.md` is the authoritative current-state document for this repository.
+## Authors
+
+| Contributor | Modules |
+|---|---|
+| **Ashwattha Phatak** | ActiveLockTable, LockService, proto definitions, cosine similarity math, e2e harness, embedding model study (matrix/overhead/model-comparison plots, MODEL_FINDINGS.md) |
+| **Ayush Gala** | Raft core (election, heartbeat, log replication), node lifecycle, proxy + leader discovery, benchmark harness, testbench, Locust workload generation, soak/report plots |

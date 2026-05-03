@@ -1,3 +1,4 @@
+// Author: Ayush Gala
 // Implements the in-memory Raft node used by dscc-node.
 // This covers leader election, log replication, and commit/application.
 

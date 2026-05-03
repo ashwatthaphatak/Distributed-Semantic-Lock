@@ -81,3 +81,20 @@ proto/*.grpc.pb.cc
 
 # Claude code
 CLAUDE.md
+
+# Paper / architecture docs (submitted separately)
+paper/
+
+# Generated benchmark logs
+logs/*.json
+logs/*.csv
+logs/overhead_*/
+logs/soak_run_*/
+
+# Generated plot images
+scripts/plots/**/*.png
+scripts/plots/
+
+# Generated Python protobuf stubs at repo root
+dscc_pb2.py
+dscc_pb2_grpc.py

@@ -1,3 +1,4 @@
+// Author: Ashwattha Phatak
 // Runs the real end-to-end demo: text files -> embeddings -> DSLM -> Qdrant.
 // This is the primary professor-facing test harness for the current repo.
 // It coordinates Docker startup, scenario execution, validation, and readable output.

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Author: Ayush Gala
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -15,7 +16,7 @@ set -euo pipefail
 #   - curl must be installed     (usually pre-installed)
 # ---------------------------------------------------------------------------
 
-PROTO_DIR="$(cd "$(dirname "$0")" && pwd)/proto"
+PROTO_DIR="$(cd "$(dirname "$0")/../.." && pwd)/proto"
 PROTO_FILE="dscc.proto"
 
 EMBEDDING_HOST="${EMBEDDING_HOST:-127.0.0.1}"

@@ -1,5 +1,8 @@
 # Demo Inputs — Agent Profiles
 
+**Authors: Ashwattha Phatak, Ayush Gala**  
+CSC 724 — Advanced Distributed Systems, NC State University
+
 Each JSON file in this directory defines a simulated agent participating in a
 multi-discipline design collaboration for a **civic annex building project**.
 The agents are used by the e2e demo and benchmark harnesses to generate

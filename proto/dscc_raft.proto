@@ -1,3 +1,4 @@
+// Author: Ashwattha Phatak
 syntax = "proto3";
 
 package dscc_raft;

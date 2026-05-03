@@ -1,3 +1,4 @@
+// Author: Ashwattha Phatak
 // Defines the gRPC contract between the end-to-end bench and dscc-node.
 // AcquireGuard carries embeddings plus trace metadata used in the demo output.
 // The generated protobuf files are built from this schema.

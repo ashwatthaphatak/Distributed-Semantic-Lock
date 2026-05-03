@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Author: Ayush Gala
 # Run the DSLM and Qdrant-direct Locust workloads back-to-back against the
 # same traffic shape, then produce a side-by-side overhead plot + summary CSV.
 #
@@ -20,7 +21,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 # ----- Defaults -------------------------------------------------------------
 
@@ -176,7 +177,7 @@ else
 fi
 
 log "Run 1/2: BASELINE — direct Qdrant traffic"
-locust -f locustfile_base.py \
+locust -f scripts/workload/locustfile_base.py \
     "${MODE_FLAGS[@]}" \
     -u "${USERS}" -r "${SPAWN_RATE}" \
     --run-time "${DURATION}" \
@@ -184,7 +185,7 @@ locust -f locustfile_base.py \
     2>&1 | tee "${OUTPUT_DIR}/baseline.log"
 
 log "Run 2/2: DSLM — full coordination stack"
-locust -f locustfile.py \
+locust -f scripts/workload/locustfile.py \
     "${MODE_FLAGS[@]}" \
     -u "${USERS}" -r "${SPAWN_RATE}" \
     --run-time "${DURATION}" \
@@ -197,7 +198,7 @@ if [[ "${SKIP_PLOT}" == "1" ]]; then
     log "Skipping plot generation (-P)."
 else
     log "Generating overhead comparison plot"
-    if ! "${PYTHON_BIN}" "${SCRIPT_DIR}/plot_overhead.py" \
+    if ! "${PYTHON_BIN}" "${REPO_ROOT}/scripts/analysis/plot_overhead.py" \
             --baseline "${OUTPUT_DIR}/baseline_stats.csv" \
             --dslm     "${OUTPUT_DIR}/dslm_stats.csv" \
             --output-dir "${OUTPUT_DIR}"; then

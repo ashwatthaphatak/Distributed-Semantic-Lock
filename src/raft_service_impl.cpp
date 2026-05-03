@@ -1,3 +1,4 @@
+// Author: Ayush Gala
 // Implements the thin gRPC wrapper around the RaftNode core.
 
 #include "raft_service_impl.h"

@@ -1,3 +1,4 @@
+// Author: Ashwattha Phatak
 // Declares the in-memory semantic lock table and the lock-acquire trace data.
 // This is the core overlap-checking layer used by lock_service_impl.cpp.
 // It owns the active lock list and exposes acquire/release operations.
@@ -51,6 +52,7 @@ struct AcquireTrace {
 
 class ActiveLockTable {
 public:
+    // Legacy single-node acquire path: blocks inline until no conflict, then takes ownership directly.
     AcquireTrace acquire(const std::string& agent_id,
                          const std::vector<float>& embedding,
                          float threshold);
@@ -66,12 +68,15 @@ public:
     // Rebalances any waiters queued behind it.
     void remove_pending(const std::string& agent_id);
 
+    // Release a held lock and trigger waiter rebalancing across the active table.
     void release(const std::string& agent_id);
 
+    // Raft apply callback: promotes a pending slot (or inserts a new real lock) on all replicas.
     void apply_acquire(const std::string& agent_id,
                        const std::vector<float>& embedding,
                        float threshold);
 
+    // Raft apply callback for RELEASE entries; delegates to release().
     void apply_release(const std::string& agent_id);
 
     size_t size() const;
@@ -85,6 +90,7 @@ public:
     std::vector<std::string> begin_leader_sweep();
     void end_leader_sweep();
 
+    // Core mathematical primitive: computes normalised dot-product similarity used for every conflict check.
     static float cosine_similarity(const std::vector<float>& a,
                                    const std::vector<float>& b);
 

@@ -1,3 +1,4 @@
+// Author: Ashwattha Phatak
 // Implements the gRPC lock service used by dscc-node.
 // This file bridges the semantic lock table and the Qdrant write path.
 // It is the server-side core that the end-to-end bench exercises.

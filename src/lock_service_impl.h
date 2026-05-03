@@ -1,3 +1,4 @@
+// Author: Ashwattha Phatak
 // Declares the gRPC service implementation for the semantic lock manager.
 // This interface is owned by dscc-node and is implemented in lock_service_impl.cpp.
 // It sits between incoming AcquireGuard RPCs and the active lock/Qdrant layers.
@@ -26,14 +27,17 @@ public:
                     std::string qdrant_port,
                     std::string qdrant_collection);
 
+    // Health-check RPC; confirms the node is reachable and returns its identity.
     grpc::Status Ping(grpc::ServerContext* context,
                       const dscc::PingRequest* request,
                       dscc::PingResponse* response) override;
 
+    // Critical path entry point: orchestrates admission, Raft replication, Qdrant write, and release.
     grpc::Status AcquireGuard(grpc::ServerContext* context,
                               const dscc::AcquireRequest* request,
                               dscc::AcquireResponse* response) override;
 
+    // Explicit client-driven release: replicates RELEASE through Raft so all replicas converge.
     grpc::Status ReleaseGuard(grpc::ServerContext* context,
                               const dscc::ReleaseRequest* request,
                               dscc::ReleaseResponse* response) override;

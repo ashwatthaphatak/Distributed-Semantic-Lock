@@ -1,3 +1,4 @@
+# Author: Ayush Gala
 #!/usr/bin/env python3
 """
 thundering_herd.py — standalone thundering-herd workload generator.
@@ -95,6 +96,11 @@ HERD_TIMEOUT_S  = int(os.environ.get("HERD_TIMEOUT_S",    "60"))
 
 # ── Proto stubs ────────────────────────────────────────────────────────────────
 
+import pathlib as _pathlib
+_proto_root = str(_pathlib.Path(__file__).resolve().parents[2])
+if _proto_root not in sys.path:
+    sys.path.insert(0, _proto_root)
+
 try:
     import dscc_pb2
     import dscc_pb2_grpc
@@ -129,8 +135,7 @@ def fetch_embedding(text: str) -> list[float]:
 
 
 def load_concept_a_payload() -> str:
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "demo_inputs", "A.json")
+    path = str(_pathlib.Path(__file__).resolve().parents[2] / "demo_inputs" / "A.json")
     if not os.path.exists(path):
         sys.exit(
             f"ERROR: {path} not found.\n"

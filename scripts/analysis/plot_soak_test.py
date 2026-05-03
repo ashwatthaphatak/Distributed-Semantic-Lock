@@ -1,3 +1,4 @@
+# Author: Ayush Gala
 #!/usr/bin/env python3
 """Plot time-series latency data from a DSLM soak test CSV.
 
@@ -20,12 +21,13 @@ import matplotlib.ticker as ticker
 # Helpers
 # ---------------------------------------------------------------------------
 
-PLOTS_DIR = pathlib.Path(__file__).parent / "plots" / "soak"
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+PLOTS_DIR = ROOT / "scripts" / "plots" / "soak"
 
 
 def find_latest_csv() -> pathlib.Path:
     candidates = sorted(
-        pathlib.Path("logs").glob("soak_run_*.csv"),
+        (ROOT / "logs").glob("soak_run_*.csv"),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )

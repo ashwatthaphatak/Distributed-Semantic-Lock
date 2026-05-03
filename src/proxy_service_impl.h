@@ -1,3 +1,4 @@
+// Author: Ayush Gala
 // Declares the leader-aware front-door proxy for dscc-node.
 
 #pragma once
@@ -23,17 +24,22 @@ public:
                      int leader_rpc_timeout_ms);
     ~ProxyServiceImpl();
 
+    // Starts the background leader-poll thread that keeps the known leader current.
     void Start();
+    // Stops the leader-poll thread and cleans up background state.
     void Stop();
 
+    // Health-check endpoint used by clients to confirm the proxy is reachable.
     grpc::Status Ping(grpc::ServerContext* context,
                       const dscc::PingRequest* request,
                       dscc::PingResponse* response) override;
 
+    // Forwards an acquire request to the current Raft leader, retrying on leader change.
     grpc::Status AcquireGuard(grpc::ServerContext* context,
                               const dscc::AcquireRequest* request,
                               dscc::AcquireResponse* response) override;
 
+    // Forwards a release request to the current Raft leader, retrying on leader change.
     grpc::Status ReleaseGuard(grpc::ServerContext* context,
                               const dscc::ReleaseRequest* request,
                               dscc::ReleaseResponse* response) override;

@@ -1,3 +1,4 @@
+// Author: Ayush Gala
 // Runs a curated semantic-lock benchmark suite against the full DSCC stack.
 // The runner prints a readable ANSI timeline and streams raw per-case JSON.
 

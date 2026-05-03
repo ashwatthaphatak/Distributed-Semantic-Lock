@@ -1,3 +1,4 @@
+// Author: Ashwattha Phatak
 // Implements the in-memory semantic lock table.
 // This is the DSLM blocking layer that decides whether a request must wait.
 // lock_service_impl.cpp calls into this file before any Qdrant write happens.

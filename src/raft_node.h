@@ -1,3 +1,4 @@
+// Author: Ayush Gala
 // Declares the in-memory Raft node used to replicate lock-table operations.
 // This owns leader election, log replication, and commit/apply sequencing.
 
@@ -40,9 +41,12 @@ public:
              RaftConfig config = {});
     ~RaftNode();
 
+    // Launches election-timer, heartbeat, and apply background threads.
     void Start();
+    // Signals all background threads to exit and joins them cleanly.
     void Stop();
 
+    // Replicates an entry to a quorum and blocks until it is committed or the timeout fires.
     bool Propose(const dscc_raft::LogEntry& entry,
                  std::chrono::milliseconds timeout,
                  int64_t* committed_index = nullptr);
@@ -53,14 +57,20 @@ public:
     // replicas once both are applied.
     bool AppendLocalEntry(const dscc_raft::LogEntry& entry);
 
+    // Blocks the caller until the apply thread has processed the given log index.
     bool WaitUntilApplied(int64_t index, std::chrono::milliseconds timeout);
 
+    // Entry point for inbound vote RPCs during a Raft election round.
     dscc_raft::VoteResponse HandleRequestVote(const dscc_raft::VoteRequest& request);
+    // Entry point for log replication and heartbeat RPCs from the current leader.
     dscc_raft::AppendResponse HandleAppendEntries(const dscc_raft::AppendRequest& request);
+    // Entry point for snapshot transfer RPCs used to catch up lagging followers.
     dscc_raft::SnapshotResponse HandleInstallSnapshot(
         const dscc_raft::SnapshotRequest& request);
+    // Returns the current known leader address for client-redirect responses.
     dscc_raft::LeaderInfo HandleGetLeader() const;
 
+    // Registers a callback that fires each time this node assumes leadership.
     void SetLeaderChangeCallback(LeaderCallback callback);
 
     bool IsLeader() const;

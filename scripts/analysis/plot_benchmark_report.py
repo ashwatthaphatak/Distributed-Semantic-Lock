@@ -1,3 +1,4 @@
+# Author: Ayush Gala
 #!/usr/bin/env python3
 """Generate review-ready plots from a curated DSLM benchmark JSON run."""
 
@@ -26,7 +27,7 @@ except ImportError as exc:  # pragma: no cover - import guard for local use
     ) from exc
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_LOG_DIR = ROOT / "logs"
 DEFAULT_PLOTS_ROOT = ROOT / "scripts" / "plots"
 
