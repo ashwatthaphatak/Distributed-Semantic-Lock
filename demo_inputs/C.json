@@ -1,0 +1,26 @@
+{
+  "agent_name": "Casey",
+  "role": "Cost and Budget Control Agent",
+  "personality": "Pragmatic and numbers-driven, focused on scope discipline and value engineering.",
+  "objective": "Keep the project within budget while preserving critical performance and quality goals.",
+  "payload": "Build a cost-risk snapshot for the structural frame options and identify major drivers in current quantity assumptions.",
+  "scheduled_offset_ms": 120,
+  "operation": "read",
+  "payload_schedule": [
+    {
+      "scheduled_offset_ms": 120,
+      "operation": "read",
+      "payload": "Build a cost-risk snapshot for the structural frame options and identify major drivers in current quantity assumptions."
+    },
+    {
+      "scheduled_offset_ms": 330,
+      "operation": "read",
+      "payload": "Compare curtain wall alternatives by initial cost, maintenance profile, and installation complexity."
+    },
+    {
+      "scheduled_offset_ms": 610,
+      "operation": "read",
+      "payload": "Recommend a phased value-engineering package that protects safety and sustainability commitments."
+    }
+  ]
+}

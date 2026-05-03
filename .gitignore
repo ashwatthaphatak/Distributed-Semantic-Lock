@@ -6,6 +6,8 @@ dist/
 out/
 cmake-build-*/
 
+__pycache__/
+
 # CMake files
 CMakeFiles/
 CMakeCache.txt
@@ -53,6 +55,7 @@ m4/
 *.pid
 *.seed
 *.stackdump
+logs/
 
 # Editors / IDEs
 .vscode/
@@ -68,3 +71,30 @@ Thumbs.db
 # Local runtime data
 .cache/
 ollama_data/
+
+# Generated protobuf checked into source by mistake; CMake generates fresh code
+# under the build directory instead.
+proto/*.pb.h
+proto/*.pb.cc
+proto/*.grpc.pb.h
+proto/*.grpc.pb.cc
+
+# Claude code
+CLAUDE.md
+
+# Paper / architecture docs (submitted separately)
+paper/
+
+# Generated benchmark logs
+logs/*.json
+logs/*.csv
+logs/overhead_*/
+logs/soak_run_*/
+
+# Generated plot images
+scripts/plots/**/*.png
+scripts/plots/
+
+# Generated Python protobuf stubs at repo root
+dscc_pb2.py
+dscc_pb2_grpc.py

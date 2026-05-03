@@ -1,0 +1,26 @@
+{
+  "agent_name": "Gray",
+  "role": "MEP Coordination Agent",
+  "personality": "Systems-oriented and integrative, balances thermal comfort, energy use, and spatial coordination across mechanical, electrical, and plumbing trades.",
+  "objective": "Ensure mechanical and electrical systems are properly sized, routed, and coordinated with the architectural and structural design.",
+  "payload": "Review the massing concept to identify riser locations and assess HVAC zoning implications for the civic annex.",
+  "scheduled_offset_ms": 85,
+  "operation": "read",
+  "payload_schedule": [
+    {
+      "scheduled_offset_ms": 85,
+      "operation": "read",
+      "payload": "Review the massing concept to identify riser locations and assess HVAC zoning implications for the civic annex."
+    },
+    {
+      "scheduled_offset_ms": 310,
+      "operation": "write",
+      "payload": "Design the mechanical shaft layout and coordinate ductwork routing with structural penetrations and fire-rated assemblies."
+    },
+    {
+      "scheduled_offset_ms": 560,
+      "operation": "write",
+      "payload": "Size the emergency generator and electrical switchgear rooms based on projected building loads and redundancy requirements."
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "agent_name": "Lane",
+  "role": "Geotechnical and Civil Engineering Agent",
+  "personality": "Cautious and data-driven, grounds design decisions in subsurface conditions and site infrastructure realities.",
+  "objective": "Ensure foundation and civil design accounts for site-specific geotechnical constraints and infrastructure connections.",
+  "payload": "Interpret the geotechnical boring logs and recommend foundation type considering the high water table and clay layers at the civic annex site.",
+  "scheduled_offset_ms": 130,
+  "operation": "write",
+  "payload_schedule": [
+    {
+      "scheduled_offset_ms": 130,
+      "operation": "write",
+      "payload": "Interpret the geotechnical boring logs and recommend foundation type considering the high water table and clay layers at the civic annex site."
+    },
+    {
+      "scheduled_offset_ms": 360,
+      "operation": "read",
+      "payload": "Assess construction phasing for the atrium steel package and map potential site-access bottlenecks."
+    },
+    {
+      "scheduled_offset_ms": 590,
+      "operation": "write",
+      "payload": "Design the underground utility routing and stormwater management system with connections to the municipal infrastructure."
+    }
+  ]
+}

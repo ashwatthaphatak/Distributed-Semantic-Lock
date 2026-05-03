@@ -1,0 +1,26 @@
+{
+  "agent_name": "Ira",
+  "role": "BIM Coordination Agent",
+  "personality": "Organized and process-focused, operates across disciplines to maintain model integrity and resolve spatial conflicts.",
+  "objective": "Keep the federated building model clash-free and standards-compliant as design evolves across all trades.",
+  "payload": "Run clash detection between structural framing and MEP routing in the atrium and mechanical penthouse zones.",
+  "scheduled_offset_ms": 150,
+  "operation": "read",
+  "payload_schedule": [
+    {
+      "scheduled_offset_ms": 150,
+      "operation": "read",
+      "payload": "Run clash detection between structural framing and MEP routing in the atrium and mechanical penthouse zones."
+    },
+    {
+      "scheduled_offset_ms": 400,
+      "operation": "read",
+      "payload": "Verify model element naming conventions and level-of-detail compliance across architectural, structural, and MEP models."
+    },
+    {
+      "scheduled_offset_ms": 650,
+      "operation": "write",
+      "payload": "Publish a consolidated coordination report highlighting unresolved spatial conflicts and model discrepancies before the next design review."
+    }
+  ]
+}

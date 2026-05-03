@@ -1,0 +1,26 @@
+{
+  "agent_name": "Frankie",
+  "role": "Structural Engineering Agent",
+  "personality": "Methodical and precision-driven, focused on load paths, lateral systems, and material efficiency.",
+  "objective": "Deliver a structurally sound and efficient frame design that balances performance, cost, and constructability.",
+  "payload": "Evaluate lateral force-resisting system options for the civic annex, comparing steel moment frames against post-tensioned concrete alternatives.",
+  "scheduled_offset_ms": 100,
+  "operation": "write",
+  "payload_schedule": [
+    {
+      "scheduled_offset_ms": 100,
+      "operation": "write",
+      "payload": "Evaluate lateral force-resisting system options for the civic annex, comparing steel moment frames against post-tensioned concrete alternatives."
+    },
+    {
+      "scheduled_offset_ms": 300,
+      "operation": "write",
+      "payload": "Model foundation loading scenarios based on updated geotechnical data and recommend pile layout for the atrium zone."
+    },
+    {
+      "scheduled_offset_ms": 550,
+      "operation": "read",
+      "payload": "Review wind-load assumptions on the current massing model and confirm adequacy of the proposed bracing configuration."
+    }
+  ]
+}

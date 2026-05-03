@@ -1,0 +1,26 @@
+{
+  "agent_name": "Kai",
+  "role": "Interior Architecture Agent",
+  "personality": "Creative and user-focused, balances spatial aesthetics with functional performance and occupant well-being.",
+  "objective": "Design interior environments that support the client's operational needs, reinforce civic identity, and promote occupant comfort.",
+  "payload": "Evaluate meeting-room mix against projected occupancy profiles and hybrid work patterns.",
+  "scheduled_offset_ms": 160,
+  "operation": "read",
+  "payload_schedule": [
+    {
+      "scheduled_offset_ms": 160,
+      "operation": "read",
+      "payload": "Evaluate meeting-room mix against projected occupancy profiles and hybrid work patterns."
+    },
+    {
+      "scheduled_offset_ms": 370,
+      "operation": "write",
+      "payload": "Develop an interior finish palette for high-traffic public areas balancing durability, acoustics, and civic identity."
+    },
+    {
+      "scheduled_offset_ms": 630,
+      "operation": "write",
+      "payload": "Design flexible partition layouts for the open-office zones to accommodate departmental growth projections."
+    }
+  ]
+}
